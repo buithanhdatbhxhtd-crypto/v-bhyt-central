@@ -114,7 +114,7 @@ def get_advanced_stats():
             stats['expired'] = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM participants WHERE han_the >= CURRENT_DATE AND han_the <= CURRENT_DATE + INTERVAL '30 days'")
             stats['expiring'] = cur.fetchone()[0]
-            # Thống kê chất lượng dữ liệu (PII Integrity)
+            # Thống kê chất lượng dữ liệu
             cur.execute("SELECT COUNT(*) FROM participants WHERE (cccd IS NULL OR cccd = '') OR (sdt IS NULL OR sdt = '')")
             stats['incomplete'] = cur.fetchone()[0]
             # Thống kê an ninh (Số lượt tải dữ liệu)
@@ -347,7 +347,7 @@ elif choice == "🧮 Tiện ích tính toán":
         st.subheader("Bảng tính mức đóng BHYT Hộ gia đình")
         st.caption("Áp dụng mức lương cơ sở: 2.340.000đ (Từ 01/07/2024)")
         
-        num_members = st.number_input("Số người tham gia trong hộ", 1, 10, 1)
+        num_members = st.number_input("Số người tham gia trong hộ", 1, 10, 5)
         base_salary = 2340000
         rate = 0.045 # 4.5%
         m1_price = base_salary * rate
@@ -361,9 +361,9 @@ elif choice == "🧮 Tiện ích tính toán":
             else: p = m1_price * 0.4
             prices.append(round(p))
         
-        # --- FIX LỖI: Đồng nhất độ dài các mảng cho DataFrame ---
+        # Đồng nhất độ dài các mảng cho DataFrame để tránh lỗi ValueError
         discount_labels = ["100%", "70%", "60%", "50%"] + ["40%"] * max(0, num_members - 4)
-        discount_labels = discount_labels[:num_members] # Đảm bảo đúng độ dài num_members
+        discount_labels = discount_labels[:num_members] 
             
         df_bhyt = pd.DataFrame({
             "Thứ tự": [f"Người thứ {i}" for i in range(1, num_members + 1)],
@@ -439,7 +439,7 @@ elif choice == "📥 Nhập dữ liệu":
             total = len(df_new)
             for count in import_db_logic(df_new):
                 p_bar.progress(count / total)
-                p_text.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
+                p_text.text(f"Đang nạp: {count:,} / {total:,} hàng...")
             log_activity("IMPORT", {"file": f.name, "rows": total})
             st.success(f"✅ Đã cập nhật thành công {total:,} dòng dữ liệu!"); st.balloons()
 
