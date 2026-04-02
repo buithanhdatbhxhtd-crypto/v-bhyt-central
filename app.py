@@ -15,7 +15,7 @@ st.set_page_config(
 # --- 2. KẾT NỐI DATABASE ---
 def get_db_connection():
     try:
-        # Khuyên dùng Connection Pooler (Port 6543) để tránh lỗi connection
+        # Sử dụng Connection Pooler (Port 6543) là bắt buộc cho dữ liệu lớn
         conn = psycopg2.connect(st.secrets["SUPABASE_DB_URL"])
         return conn
     except Exception as e:
@@ -30,11 +30,9 @@ def search_participants(search_query, search_type, limit=100):
     
     cur = conn.cursor()
     try:
-        # Làm sạch input tìm kiếm, loại bỏ khoảng trắng thừa
         q_clean = search_query.strip()
         
         if search_type == "Mã BHXH":
-            # Tìm kiếm chính xác mã số, loại bỏ khoảng trắng trong DB để so khớp
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
@@ -52,24 +50,19 @@ def search_participants(search_query, search_type, limit=100):
             """
             cur.execute(query, (q_clean, f"%{q_clean}%", limit))
             
-        else: # Tìm kiếm theo Tên (Thu hẹp phạm vi để chính xác hơn)
-            # 1. Chuẩn hóa chuỗi tìm kiếm (không dấu, viết thường)
+        else: # Tìm kiếm theo Tên
             q_norm = unidecode(q_clean).lower()
-            
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
                 WHERE 
-                    -- Ưu tiên: Tên chứa toàn bộ cụm từ tìm kiếm (Ví dụ: 'nguyen van quyen')
                     ho_ten_unsigned ILIKE %s 
-                    -- Hoặc có độ tương đồng cực cao (ngưỡng 0.7 thay vì 0.5 để thu hẹp kết quả)
                     OR (similarity(ho_ten_unsigned, %s) > 0.7)
                 ORDER BY 
-                    (ho_ten_unsigned = %s) DESC, -- Khớp chính xác tuyệt đối lên đầu
+                    (ho_ten_unsigned = %s) DESC,
                     similarity(ho_ten_unsigned, %s) DESC
                 LIMIT %s
             """
-            # Tham số: %query%, query, query, query, limit
             cur.execute(query, (f"%{q_norm}%", q_norm, q_norm, q_norm, limit))
         
         return cur.fetchall()
@@ -80,59 +73,51 @@ def search_participants(search_query, search_type, limit=100):
         cur.close()
         conn.close()
 
-# --- 4. LOGIC NHẬP DỮ LIỆU BATCH ---
+# --- 4. LOGIC NHẬP DỮ LIỆU TỐI ƯU HÓA (CHO 500K DÒNG) ---
 def import_excel_to_db(df):
-    # Chuẩn hóa tên cột
+    # Bước 1: Chuẩn hóa tên cột
     df.columns = [str(c).strip().lower() for c in df.columns]
-    
-    # Ánh xạ tên cột linh hoạt
     mapping = {
-        'ma so bhxh': 'ma_so_bhxh',
-        'ma the bhyt': 'ma_the_bhyt',
-        'ho ten': 'ho_ten',
-        'ngay sinh': 'ngay_sinh',
-        'socmnd': 'cccd',
-        'sodient': 'sdt',
-        'diachilh': 'dia_chi',
-        'hantheden': 'han_the'
+        'ma so bhxh': 'ma_so_bhxh', 'ma the bhyt': 'ma_the_bhyt',
+        'ho ten': 'ho_ten', 'ngay sinh': 'ngay_sinh',
+        'socmnd': 'cccd', 'sodient': 'sdt',
+        'diachilh': 'dia_chi', 'hantheden': 'han_the'
     }
     df = df.rename(columns=mapping)
     
+    # Bước 2: Kiểm tra cột bắt buộc
+    if 'ma_so_bhxh' not in df.columns or 'ho_ten' not in df.columns:
+        st.error(f"File thiếu cột bắt buộc. Cột hiện có: {list(df.columns)}")
+        return
+
+    # Bước 3: Tiền xử lý véc-tơ hóa (CỰC NHANH)
+    with st.spinner("Đang chuẩn hóa định dạng dữ liệu..."):
+        # Xử lý Ngày tháng cho toàn bộ cột một lần
+        for col in ['ngay_sinh', 'han_the']:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+            else:
+                df[col] = None
+
+        # Xử lý Chuỗi (giữ số 0, xóa .0 thừa, trim khoảng trắng) cho toàn bộ cột
+        str_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi']
+        for col in str_cols:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                df[col] = df[col].replace(['nan', 'None', 'NAT'], '')
+            else:
+                df[col] = ''
+
+    # Bước 4: Chuyển sang danh sách Tuple để nạp (itertuples nhanh hơn iterrows)
+    data_tuples = list(df[['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'sdt', 'dia_chi', 'han_the']].itertuples(index=False, name=None))
+    
     conn = get_db_connection()
     if not conn: 
-        st.error("Lỗi kết nối cơ sở dữ liệu. Hãy đảm bảo bạn đang dùng Connection Pooler (Port 6543).")
+        st.error("Không thể kết nối cơ sở dữ liệu. Hãy đảm bảo bạn đang dùng Connection Pooler (Port 6543).")
         return
     
     cur = conn.cursor()
     try:
-        data = []
-        if 'ma_so_bhxh' not in df.columns or 'ho_ten' not in df.columns:
-            st.error(f"File thiếu cột 'ma so bhxh' hoặc 'ho ten'. Cột hiện có: {list(df.columns)}")
-            return
-
-        for _, row in df.iterrows():
-            def parse_date(val):
-                if pd.isnull(val) or str(val).strip() == "": return None
-                try: return pd.to_datetime(val).date()
-                except: return None
-
-            def clean_str(val):
-                if pd.isnull(val): return ""
-                # Giữ nguyên chuỗi, chỉ xử lý trường hợp bị dính .0 do Excel hiểu nhầm là số float
-                s = str(val).strip()
-                return s.split('.')[0] if s.endswith('.0') else s
-
-            data.append((
-                clean_str(row['ma_so_bhxh']), 
-                clean_str(row.get('ma_the_bhyt', '')), 
-                str(row['ho_ten']).strip(),
-                parse_date(row.get('ngay_sinh')),
-                clean_str(row.get('cccd', '')),
-                clean_str(row.get('sdt', '')),
-                str(row.get('dia_chi', '')).strip(),
-                parse_date(row.get('han_the'))
-            ))
-
         sql = """
             INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, dia_chi, han_the)
             VALUES %s
@@ -147,12 +132,15 @@ def import_excel_to_db(df):
                 updated_at = NOW();
         """
         
-        batch_size = 2000
-        for i in range(0, len(data), batch_size):
-            batch = data[i:i + batch_size]
+        # Tăng batch_size lên 5000 để giảm thời gian giao tiếp DB
+        batch_size = 5000
+        total_len = len(data_tuples)
+        
+        for i in range(0, total_len, batch_size):
+            batch = data_tuples[i:i + batch_size]
             execute_values(cur, sql, batch)
             conn.commit()
-            yield min(i + batch_size, len(data))
+            yield min(i + batch_size, total_len)
             
     except Exception as e:
         st.error(f"Lỗi SQL khi nạp: {e}")
@@ -169,16 +157,16 @@ def main():
 
     if mode == "Tra cứu dữ liệu":
         st.subheader("🔍 Tìm kiếm người tham gia")
-        st.caption("Lưu ý: Hệ thống ưu tiên kết quả khớp chính xác cụm từ bạn nhập.")
+        st.caption("Gợi ý: Tìm tên không dấu, mã BHXH hoặc CCCD.")
         
         col1, col2 = st.columns([3, 1])
         with col1:
-            q = st.text_input("Nhập nội dung tìm kiếm...", placeholder="Nhập tên, mã BHXH hoặc số CCCD")
+            q = st.text_input("Nhập nội dung tìm kiếm...", placeholder="Nhập thông tin tại đây")
         with col2:
             stype = st.selectbox("Loại tìm kiếm", ["Tên", "Mã BHXH", "CCCD"])
 
         if q:
-            with st.spinner("Đang truy xuất dữ liệu..."):
+            with st.spinner("Đang truy xuất..."):
                 start_time = time.time()
                 data = search_participants(q, stype)
                 duration = time.time() - start_time
@@ -186,52 +174,46 @@ def main():
                 if data:
                     st.success(f"Tìm thấy {len(data)} bản ghi trong {duration:.3f} giây.")
                     df_res = pd.DataFrame(data, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "SĐT", "Hạn Thẻ"])
-                    
-                    # Data Masking cho CCCD
                     df_res['CCCD'] = df_res['CCCD'].apply(lambda x: f"{x[:3]}****{x[-3:]}" if x and len(str(x)) > 6 else x)
-                    
                     st.dataframe(df_res, use_container_width=True, hide_index=True)
-                    
-                    st.download_button(
-                        "📥 Tải kết quả này (CSV)",
-                        df_res.to_csv(index=False).encode('utf-8-sig'),
-                        f"tra_cuu_{q}.csv",
-                        "text/csv"
-                    )
                 else:
-                    st.warning("Không tìm thấy kết quả phù hợp. Hãy kiểm tra lại từ khóa hoặc loại tìm kiếm.")
+                    st.warning("Không tìm thấy kết quả phù hợp.")
 
     else: # Quản trị viên
-        st.subheader("📥 Nhập dữ liệu từ Excel (XLSX/XLSB)")
-        st.warning("⚠️ Hệ thống sẽ giữ nguyên các số 0 ở đầu mã số BHXH/CCCD.")
+        st.subheader("📥 Nhập dữ liệu hàng loạt (Hỗ trợ tối đa 500.000 hàng)")
+        st.warning("⚠️ Hệ thống đã được tối ưu hóa để nạp dữ liệu lớn. Vui lòng không tắt trình duyệt khi đang xử lý.")
         
-        uploaded_file = st.file_uploader("Chọn tệp dữ liệu", type=["xlsx", "xlsb"])
+        uploaded_file = st.file_uploader("Chọn tệp Excel (.xlsx, .xlsb)", type=["xlsx", "xlsb"])
         if uploaded_file:
             try:
                 engine = 'pyxlsb' if uploaded_file.name.endswith('.xlsb') else None
-                # QUAN TRỌNG: dtype=str để không bị mất số 0 đầu
-                df_preview = pd.read_excel(uploaded_file, engine=engine, dtype=str)
+                # Đọc file (Dùng dtype=str để giữ số 0)
+                with st.spinner("Đang đọc file Excel..."):
+                    df_preview = pd.read_excel(uploaded_file, engine=engine, dtype=str)
                 
                 st.write(f"📊 Phát hiện: **{len(df_preview):,}** hàng dữ liệu.")
-                st.dataframe(df_preview.head(10)) # Hiện 10 dòng để kiểm tra số 0 đầu
+                st.dataframe(df_preview.head(5)) 
                 
-                if st.button("🚀 Thực hiện nạp vào hệ thống"):
+                if st.button("🚀 Bắt đầu thực hiện nạp"):
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
                     total = len(df_preview)
                     success_count = 0
+                    
+                    start_import = time.time()
                     for count in import_excel_to_db(df_preview):
                         percent = count / total
                         progress_bar.progress(percent)
-                        status_text.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
+                        status_text.text(f"Đang nạp: {count:,} / {total:,} dòng...")
                         success_count = count
                     
+                    end_import = time.time()
                     if success_count > 0:
-                        st.success(f"✅ Đã nạp thành công {success_count:,} bản ghi!")
+                        st.success(f"✅ Hoàn tất! Đã nạp thành công {success_count:,} bản ghi trong {int(end_import - start_import)} giây.")
                         st.balloons()
             except Exception as e:
-                st.error(f"Lỗi: {e}")
+                st.error(f"Lỗi hệ thống: {e}")
 
 if __name__ == "__main__":
     main()
