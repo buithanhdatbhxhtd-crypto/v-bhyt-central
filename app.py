@@ -273,9 +273,20 @@ elif choice == "🔍 Tra cứu & Xuất dữ liệu":
         log_activity("SEARCH", {"type": stype, "q": q_m, "dob": q_s, "count": len(res)})
         if res:
             df = pd.DataFrame(res, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "Địa chỉ", "SĐT", "Email", "Hạn Thẻ"])
+            
+            # Định dạng ngày tháng hiển thị
             for c in ["Ngày Sinh", "Hạn Thẻ"]:
                 df[c] = pd.to_datetime(df[c], errors='coerce').dt.strftime('%d/%m/%Y')
             
+            # --- BẢO MẬT: CHE SỐ CCCD (3 ĐẦU - 3 CUỐI) ---
+            df['CCCD'] = df['CCCD'].apply(lambda x: f"{str(x)[:3]}****{str(x)[-3:]}" if pd.notnull(x) and len(str(x)) >= 6 else x)
+            
+            # Xử lý làm đẹp các giá trị trống (NaN)
+            df = df.fillna("")
+            df['SĐT'] = df['SĐT'].replace("None", "").replace("nan", "")
+            df['Email'] = df['Email'].replace("None", "").replace("nan", "")
+            df['Thẻ BHYT'] = df['Thẻ BHYT'].replace("None", "").replace("nan", "")
+
             st.success(f"Tìm thấy {len(df)} kết quả.")
             st.download_button("📥 Tải về file Excel", export_excel(df), f"BHYT_TraCuu_{datetime.now().strftime('%Y%m%d')}.xlsx")
             st.dataframe(df, use_container_width=True, hide_index=True)
