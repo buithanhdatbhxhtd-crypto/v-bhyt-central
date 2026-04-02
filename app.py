@@ -48,6 +48,7 @@ def logout_user():
 def is_admin():
     if not st.session_state.user:
         return False
+    # Đảm bảo email của bạn có trong danh sách ADMIN_EMAIL trong Secrets của Streamlit
     admin_emails = ["admin@example.com", st.secrets.get("ADMIN_EMAIL", "")]
     return st.session_state.user.email in admin_emails
 
@@ -64,6 +65,8 @@ def log_activity(action, details):
                 (st.session_state.user.email, action, str(details))
             )
             conn.commit()
+        except:
+            pass
         finally:
             cur.close()
             conn.close()
@@ -74,22 +77,39 @@ def search_participants(search_query, search_type, limit=100):
     cur = conn.cursor()
     try:
         q_clean = search_query.strip()
+        # Chuyển sang dùng Named Placeholders (%(name)s) để tránh lỗi index
         if search_type == "Mã BHXH":
-            query = "SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the FROM participants WHERE ma_so_bhxh = %s OR ma_so_bhxh ILIKE %s LIMIT %s"
-            cur.execute(query, (q_clean, f"%{q_clean}", limit))
+            query = """
+                SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
+                FROM participants 
+                WHERE ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(like_q)s 
+                LIMIT %(limit)s
+            """
+            cur.execute(query, {'q': q_clean, 'like_q': f"%{q_clean}", 'limit': limit})
         elif search_type == "CCCD":
-            query = "SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the FROM participants WHERE cccd = %s OR cccd ILIKE %s LIMIT %s"
-            cur.execute(query, (q_clean, f"%{q_clean}", limit))
+            query = """
+                SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
+                FROM participants 
+                WHERE cccd = %(q)s OR cccd ILIKE %(like_q)s 
+                LIMIT %(limit)s
+            """
+            cur.execute(query, {'q': q_clean, 'like_q': f"%{q_clean}", 'limit': limit})
         else:
             q_norm = unidecode(q_clean).lower()
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
-                WHERE ho_ten_unsigned = %s OR ho_ten_unsigned ILIKE %s OR (similarity(ho_ten_unsigned, %s) > 0.85)
-                ORDER BY (ho_ten_unsigned = %s) DESC, (ho_ten_unsigned ILIKE %s) DESC, similarity(ho_ten_unsigned, %s) DESC
-                LIMIT %s
+                WHERE 
+                    ho_ten_unsigned = %(q)s 
+                    OR ho_ten_unsigned ILIKE %(like_q)s 
+                    OR (similarity(ho_ten_unsigned, %(q)s) > 0.85)
+                ORDER BY 
+                    (ho_ten_unsigned = %(q)s) DESC, 
+                    (ho_ten_unsigned ILIKE %(like_q)s) DESC, 
+                    similarity(ho_ten_unsigned, %(q)s) DESC
+                LIMIT %(limit)s
             """
-            cur.execute(query, (q_norm, f"%{q_norm}%", q_norm, q_norm, f"%{q_norm}%", q_norm, limit))
+            cur.execute(query, {'q': q_norm, 'like_q': f"%{q_norm}%", 'limit': limit})
         return cur.fetchall()
     finally:
         cur.close()
@@ -193,6 +213,10 @@ if st.session_state.user is None:
                     auth_res = login_user(email, password)
                     if auth_res:
                         st.session_state.user = auth_res.user
+                        # GHI NHẬT KÝ ĐĂNG NHẬP
+                        log_activity("LOGIN", f"Người dùng {email} đăng nhập thành công.")
+                        st.success("Đăng nhập thành công!")
+                        time.sleep(1)
                         st.rerun()
     st.stop()
 
@@ -209,6 +233,7 @@ if is_admin():
 choice = st.sidebar.radio("Menu Chức năng", menu_options)
 
 if st.sidebar.button("🚪 Đăng xuất"):
+    log_activity("LOGOUT", f"Người dùng {st.session_state.user.email} đăng xuất.")
     logout_user()
 
 if choice == "🔍 Tra cứu dữ liệu":
@@ -221,6 +246,9 @@ if choice == "🔍 Tra cứu dữ liệu":
 
     if q:
         with st.spinner("Đang truy xuất..."):
+            # GHI NHẬT KÝ TRUY VẤN (Ghi trước khi thực hiện để đảm bảo luôn lưu lại yêu cầu)
+            log_activity("SEARCH_REQUEST", f"Tra cứu {stype}: {q}")
+            
             data = search_participants(q, stype)
             if data:
                 st.success(f"Tìm thấy {len(data)} kết quả.")
@@ -229,7 +257,6 @@ if choice == "🔍 Tra cứu dữ liệu":
                     df_res[date_col] = pd.to_datetime(df_res[date_col], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
                 df_res['CCCD'] = df_res['CCCD'].apply(lambda x: f"{x[:3]}****{x[-3:]}" if x and len(str(x)) > 6 else x)
                 st.dataframe(df_res, use_container_width=True, hide_index=True)
-                log_activity("SEARCH", f"Tra cứu {stype}: {q}")
             else:
                 st.warning("Không tìm thấy kết quả.")
 
@@ -269,7 +296,6 @@ elif choice == "📜 Nhật ký hoạt động":
     conn = get_db_connection()
     if conn:
         try:
-            # Sửa lỗi Alias dùng nháy kép "" thay vì nháy đơn '' cho PostgreSQL
             query = """
                 SELECT 
                     created_at AS "Thời gian", 
