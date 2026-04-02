@@ -15,7 +15,7 @@ st.set_page_config(
 # --- 2. KẾT NỐI DATABASE ---
 def get_db_connection():
     try:
-        # LƯU Ý: Phải sử dụng URI của Connection Pooler (Port 6543)
+        # Sử dụng Connection Pooler (Port 6543)
         conn = psycopg2.connect(st.secrets["SUPABASE_DB_URL"], connect_timeout=10)
         return conn
     except Exception as e:
@@ -50,20 +50,25 @@ def search_participants(search_query, search_type, limit=100):
             """
             cur.execute(query, (q_clean, f"%{q_clean}%", limit))
             
-        else: # Tìm kiếm theo Tên
+        else: # Tìm kiếm theo Tên (Nâng cấp độ chính xác)
             q_norm = unidecode(q_clean).lower()
+            
+            # Cải tiến: Chỉ lấy kết quả có chứa cụm từ hoặc độ tương đồng rất cao (> 0.8)
+            # Điều này giúp loại bỏ các trường hợp như "Lương Văn Hiên" ra quá nhiều kết quả họ Lương
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
                 WHERE 
-                    ho_ten_unsigned ILIKE %s 
-                    OR (similarity(ho_ten_unsigned, %s) > 0.7)
+                    ho_ten_unsigned = %s -- Ưu tiên khớp chính xác tuyệt đối
+                    OR ho_ten_unsigned ILIKE %s -- Hoặc chứa cụm từ đó
+                    OR (similarity(ho_ten_unsigned, %s) > 0.8) -- Hoặc rất giống
                 ORDER BY 
-                    (ho_ten_unsigned = %s) DESC,
+                    (ho_ten_unsigned = %s) DESC, -- Chính xác 100% lên đầu
+                    (ho_ten_unsigned ILIKE %s) DESC, -- Khớp cụm từ lên trên
                     similarity(ho_ten_unsigned, %s) DESC
                 LIMIT %s
             """
-            cur.execute(query, (f"%{q_norm}%", q_norm, q_norm, q_norm, limit))
+            cur.execute(query, (q_norm, f"%{q_norm}%", q_norm, q_norm, f"%{q_norm}%", q_norm, limit))
         
         return cur.fetchall()
     except Exception as e:
@@ -93,9 +98,8 @@ def delete_all_data():
         cur.close()
         conn.close()
 
-# --- 5. LOGIC NHẬP DỮ LIỆU TỐI ƯU HÓA CAO (CHO 500K DÒNG) ---
+# --- 5. LOGIC NHẬP DỮ LIỆU TỐI ƯU HÓA ---
 def import_excel_to_db(df):
-    # Bước 1: Chuẩn hóa tên cột
     df.columns = [str(c).strip().lower() for c in df.columns]
     mapping = {
         'ma so bhxh': 'ma_so_bhxh', 'ma the bhyt': 'ma_the_bhyt',
@@ -105,17 +109,14 @@ def import_excel_to_db(df):
     }
     df = df.rename(columns=mapping)
     
-    # Bước 2: Tiền xử lý véc-tơ hóa
     with st.spinner("Đang chuẩn hóa dữ liệu..."):
-        # Xử lý Ngày tháng
         for col in ['ngay_sinh', 'han_the']:
             if col in df.columns:
-                temp_dt = pd.to_datetime(df[col], errors='coerce')
+                temp_dt = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
                 df[col] = temp_dt.apply(lambda x: x.date() if pd.notnull(x) else None)
             else:
                 df[col] = None
 
-        # Xử lý Chuỗi
         str_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi']
         for col in str_cols:
             if col in df.columns:
@@ -125,9 +126,8 @@ def import_excel_to_db(df):
             else:
                 df[col] = None
 
-    # Chuyển đổi sang List of Tuples
     data_tuples = list(df[['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'sdt', 'dia_chi', 'han_the']].itertuples(index=False, name=None))
-    del df # Giải phóng bộ nhớ
+    del df
 
     sql = """
         INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, dia_chi, han_the)
@@ -143,13 +143,11 @@ def import_excel_to_db(df):
             updated_at = NOW();
     """
     
-    # Nạp theo lô (Batch)
     batch_size = 3000 
     total_len = len(data_tuples)
     
     for i in range(0, total_len, batch_size):
         batch = data_tuples[i:i + batch_size]
-        
         conn = get_db_connection()
         if not conn:
             st.error(f"Mất kết nối tại dòng {i:,}. Đang thử lại...")
@@ -169,7 +167,6 @@ def import_excel_to_db(df):
         finally:
             cur.close()
             conn.close()
-        
         time.sleep(0.1)
 
 # --- 6. GIAO DIỆN CHÍNH ---
@@ -195,14 +192,20 @@ def main():
                 if data:
                     st.success(f"Tìm thấy {len(data)} bản ghi trong {duration:.3f} giây.")
                     df_res = pd.DataFrame(data, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "SĐT", "Hạn Thẻ"])
+                    
+                    # --- ĐỊNH DẠNG NGÀY THÁNG THEO CHUẨN VIỆT NAM (dd/mm/yyyy) ---
+                    for date_col in ["Ngày Sinh", "Hạn Thẻ"]:
+                        df_res[date_col] = pd.to_datetime(df_res[date_col], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
+
+                    # Data Masking cho CCCD
                     df_res['CCCD'] = df_res['CCCD'].apply(lambda x: f"{x[:3]}****{x[-3:]}" if x and len(str(x)) > 6 else x)
+                    
                     st.dataframe(df_res, use_container_width=True, hide_index=True)
                 else:
                     st.warning("Không tìm thấy kết quả phù hợp.")
 
     else: # Quản trị viên
         st.subheader("⚙️ Quản lý dữ liệu hệ thống")
-        
         tab1, tab2 = st.tabs(["📥 Nhập dữ liệu mới", "🗑️ Dọn dẹp dữ liệu"])
         
         with tab1:
@@ -219,34 +222,26 @@ def main():
                     if st.button("🚀 Bắt đầu nạp vào hệ thống"):
                         progress_bar = st.progress(0)
                         status_text = st.empty()
-                        
                         total = len(df_preview)
                         success_count = 0
                         start_import = time.time()
-                        
                         for count in import_excel_to_db(df_preview):
                             percent = count / total
                             progress_bar.progress(percent)
                             status_text.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
                             success_count = count
-                        
                         if success_count > 0:
-                            st.success(f"✅ Thành công! Đã nạp {success_count:,} dòng trong {int(time.time() - start_import)} giây.")
+                            st.success(f"✅ Thành công! Đã nạp {success_count:,} dòng.")
                             st.balloons()
                 except Exception as e:
                     st.error(f"Lỗi: {e}")
         
         with tab2:
             st.markdown("##### Xóa toàn bộ dữ liệu hiện có")
-            st.error("⚠️ Cảnh báo: Thao tác này sẽ xóa sạch tất cả thông tin người tham gia trong hệ thống và không thể hoàn tác.")
-            
             confirm = st.checkbox("Tôi xác nhận muốn xóa toàn bộ dữ liệu để import mới.")
             if st.button("🔴 Xóa sạch dữ liệu", disabled=not confirm):
-                with st.spinner("Đang xóa..."):
-                    if delete_all_data():
-                        st.success("Đã dọn dẹp sạch sẽ cơ sở dữ liệu. Bây giờ bạn có thể nhập dữ liệu mới.")
-                    else:
-                        st.error("Không thể xóa dữ liệu. Vui lòng thử lại sau.")
+                if delete_all_data():
+                    st.success("Đã dọn dẹp sạch sẽ cơ sở dữ liệu.")
 
 if __name__ == "__main__":
     main()
