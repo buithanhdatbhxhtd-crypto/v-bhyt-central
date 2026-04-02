@@ -18,7 +18,7 @@ st.set_page_config(
 
 # --- 2. KẾT NỐI HỆ THỐNG ---
 
-# Khởi tạo Supabase Client (Dùng cho Auth)
+# Khởi tạo Supabase Client (Dùng cho Auth & Tra cứu thông thường)
 @st.cache_resource
 def init_supabase():
     url = st.secrets["SUPABASE_URL"]
@@ -61,22 +61,36 @@ def update_password(new_password):
         return None
 
 def admin_reset_user_password(target_email, new_password):
-    """Admin đặt lại mật khẩu cho người dùng khác (Yêu cầu Service Role Key)"""
+    """Admin đặt lại mật khẩu cho người dùng khác (Tạo Client Admin riêng để tránh lỗi session)"""
     try:
-        # Lấy danh sách users để tìm ID (Vì Admin API cần ID)
-        users = supabase.auth.admin.list_users()
-        user_to_reset = next((u for u in users if u.email == target_email), None)
+        # Tạo một Client Admin tạm thời để thực hiện quyền tối cao
+        # Đảm bảo SUPABASE_KEY trong Secrets của bạn là SERVICE_ROLE_KEY
+        admin_client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+        
+        # 1. Lấy danh sách users (Dùng auth.admin)
+        response = admin_client.auth.admin.list_users()
+        
+        # Kết quả trả về có danh sách nằm trong thuộc tính 'users'
+        all_users = response.users if hasattr(response, 'users') else response
+        
+        # 2. Tìm User theo email
+        user_to_reset = next((u for u in all_users if u.email == target_email), None)
         
         if user_to_reset:
-            supabase.auth.admin.update_user_by_id(
+            # 3. Thực hiện cập nhật mật khẩu theo ID
+            admin_client.auth.admin.update_user_by_id(
                 user_to_reset.id, 
                 {"password": new_password}
             )
-            return True, "Cập nhật mật khẩu thành công!"
+            return True, f"Đã đặt lại mật khẩu mới cho {target_email} thành công!"
         else:
-            return False, "Không tìm thấy Email người dùng này trong hệ thống."
+            return False, f"Không tìm thấy Email '{target_email}' trong hệ thống User của Supabase."
     except Exception as e:
-        return False, f"Lỗi: {str(e)}. (Lưu ý: Bạn cần dùng Service Role Key trong Secrets để thực hiện quyền này)"
+        # Xử lý lỗi thông báo thân thiện hơn
+        error_msg = str(e)
+        if "User not allowed" in error_msg:
+            return False, "Lỗi: Quyền hạn không đủ. Vui lòng kiểm tra lại 'service_role' key trong Secrets của Streamlit."
+        return False, f"Lỗi hệ thống: {error_msg}"
 
 def is_admin():
     if not st.session_state.user:
@@ -355,13 +369,14 @@ elif choice == "👥 Quản lý người dùng":
             elif len(admin_new_pwd) < 6:
                 st.warning("Mật khẩu mới phải từ 6 ký tự trở lên.")
             else:
-                success, msg = admin_reset_user_password(target_email, admin_new_pwd)
-                if success:
-                    st.success(msg)
-                    log_activity("ADMIN_RESET_PWD", {"target": target_email})
-                else:
-                    st.error(msg)
-                    st.caption("Gợi ý: Kiểm tra lại mã Service Role Key trong Secrets.")
+                with st.spinner("Đang xử lý quyền Admin..."):
+                    success, msg = admin_reset_user_password(target_email, admin_new_pwd)
+                    if success:
+                        st.success(msg)
+                        log_activity("ADMIN_RESET_PWD", {"target": target_email})
+                    else:
+                        st.error(msg)
+                        st.caption("💡 Mẹo: Hãy chắc chắn bạn đã nhấn 'Save' trong phần Secrets của Streamlit sau khi dán Key.")
 
 elif choice == "📥 Nhập dữ liệu mới":
     st.header("📥 Nhập dữ liệu hàng loạt")
