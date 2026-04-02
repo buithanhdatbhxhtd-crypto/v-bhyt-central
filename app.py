@@ -95,20 +95,22 @@ def import_excel_to_db(df):
             else:
                 df[col] = None
 
-        # Xử lý Chuỗi - QUAN TRỌNG: Giữ NULL cho CCCD để tránh lỗi Unique
+        # Xử lý Chuỗi - QUAN TRỌNG: Xử lý triệt để các giá trị NaN/Null
         str_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi']
         for col in str_cols:
             if col in df.columns:
-                # Ép kiểu và xử lý .0
+                # 1. Chuyển sang chuỗi, xử lý .0 của Excel
                 df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                # Thay thế các giá trị trống bằng None (NULL trong DB) thay vì chuỗi rỗng
-                df[col] = df[col].replace(['nan', 'None', 'NAT', 'NaT', '<NA>', ''], None)
+                # 2. Ép tất cả các dạng "Trống" (bao gồm cả chữ 'nan' sinh ra từ astype(str)) về None
+                # Thêm 'NaN', 'nan', 'NAN' để đảm bảo không bị sót
+                null_values = ['nan', 'None', 'NAT', 'NaT', '<NA>', '', 'NaN', 'NAN', 'null', 'NULL']
+                df[col] = df[col].where(~df[col].isin(null_values), None)
             else:
                 df[col] = None
 
     # Chuyển đổi sang List of Tuples
     data_tuples = list(df[['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'sdt', 'dia_chi', 'han_the']].itertuples(index=False, name=None))
-    del df # Giải phóng bộ nhớ
+    del df # Giải phóng bộ nhớ ngay để tránh tràn RAM
 
     sql = """
         INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, dia_chi, han_the)
