@@ -52,50 +52,19 @@ def is_admin():
     admin_emails = ["admin@example.com", st.secrets.get("ADMIN_EMAIL", "")]
     return st.session_state.user.email in admin_emails
 
-# --- 3. LOGIC TRUY VẤN & NHẬT KÝ ---
-
-def log_activity(action, details):
-    """Ghi lại hoạt động của người dùng vào bảng audit_logs một cách an toàn"""
-    if not st.session_state.user: 
-        return
-    
-    conn = get_db_connection()
-    if conn:
-        try:
-            with conn.cursor() as cur:
-                # Tự động tạo bảng nếu chưa tồn tại ngay khi ghi log
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS audit_logs (
-                        id BIGSERIAL PRIMARY KEY,
-                        created_at TIMESTAMPTZ DEFAULT NOW(),
-                        email TEXT,
-                        action TEXT,
-                        details TEXT
-                    );
-                """)
-                # Ghi nhật ký với Named Parameters
-                sql = "INSERT INTO audit_logs (email, action, details) VALUES (%(email)s, %(action)s, %(details)s)"
-                cur.execute(sql, {
-                    'email': st.session_state.user.email,
-                    'action': action,
-                    'details': str(details)
-                })
-            conn.commit()
-        except Exception as e:
-            # Ghi lỗi ra terminal của Streamlit để admin theo dõi
-            print(f"Lỗi hệ thống khi lưu nhật ký: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
+# --- 3. LOGIC TRUY VẤN DỮ LIỆU ---
 
 def search_participants(q_main, q_sub, search_type, limit=100):
     conn = get_db_connection()
     if not conn: return []
     cur = conn.cursor()
     try:
+        # Danh sách các cột cần lấy (Đã thêm dia_chi và email)
+        select_fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the"
+        
         if search_type == "Mã BHXH":
-            query = """
-                SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
+            query = f"""
+                SELECT {select_fields} 
                 FROM participants 
                 WHERE ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(like_q)s 
                 LIMIT %(limit)s
@@ -103,8 +72,8 @@ def search_participants(q_main, q_sub, search_type, limit=100):
             cur.execute(query, {'q': q_main.strip(), 'like_q': f"%{q_main.strip()}", 'limit': limit})
             
         elif search_type == "CCCD":
-            query = """
-                SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
+            query = f"""
+                SELECT {select_fields} 
                 FROM participants 
                 WHERE cccd = %(q)s OR cccd ILIKE %(like_q)s 
                 LIMIT %(limit)s
@@ -115,20 +84,19 @@ def search_participants(q_main, q_sub, search_type, limit=100):
             name_norm = unidecode(q_main.strip()).lower()
             dob_clean = q_sub.strip().replace("/", "").replace("-", "").replace(" ", "")
             
-            # Logic SQL linh hoạt cho Ngày sinh
             dob_filter = ""
             params = {'name': name_norm, 'like_name': f"%{name_norm}%", 'limit': limit}
             
             if dob_clean:
-                if len(dob_clean) == 4: # Tìm theo năm sinh
+                if len(dob_clean) == 4: # Năm sinh
                     dob_filter = "AND TO_CHAR(ngay_sinh, 'YYYY') = %(dob)s"
                     params['dob'] = dob_clean
-                else: # Tìm theo ngày đầy đủ (viết liền hoặc có gạch)
+                else: # Ngày đầy đủ
                     dob_filter = "AND (TO_CHAR(ngay_sinh, 'DDMMYYYY') = %(dob)s OR TO_CHAR(ngay_sinh, 'YYYYMMDD') = %(dob)s)"
                     params['dob'] = dob_clean
 
             query = f"""
-                SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
+                SELECT {select_fields} 
                 FROM participants 
                 WHERE (
                     ho_ten_unsigned = %(name)s 
@@ -156,7 +124,8 @@ def import_excel_to_db(df):
         'ma so bhxh': 'ma_so_bhxh', 'ma the bhyt': 'ma_the_bhyt',
         'ho ten': 'ho_ten', 'ngay sinh': 'ngay_sinh',
         'socmnd': 'cccd', 'sodient': 'sdt',
-        'diachilh': 'dia_chi', 'hantheden': 'han_the'
+        'diachilh': 'dia_chi', 'hantheden': 'han_the',
+        'email': 'email' # Ánh xạ thêm cột email
     }
     df = df.rename(columns=mapping)
     
@@ -168,7 +137,7 @@ def import_excel_to_db(df):
             else:
                 df[col] = None
 
-        str_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi']
+        str_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi', 'email']
         for col in str_cols:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
@@ -177,19 +146,21 @@ def import_excel_to_db(df):
             else:
                 df[col] = None
 
-    data_tuples = list(df[['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'sdt', 'dia_chi', 'han_the']].itertuples(index=False, name=None))
+    # Tạo Tuple dữ liệu đầy đủ các cột
+    data_tuples = list(df[['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'dia_chi', 'sdt', 'email', 'han_the']].itertuples(index=False, name=None))
     del df
 
     sql = """
-        INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, dia_chi, han_the)
+        INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
         VALUES %s
         ON CONFLICT (ma_so_bhxh) DO UPDATE SET
             ma_the_bhyt = EXCLUDED.ma_the_bhyt,
             ho_ten = EXCLUDED.ho_ten,
             ngay_sinh = EXCLUDED.ngay_sinh,
             cccd = EXCLUDED.cccd,
-            sdt = EXCLUDED.sdt,
             dia_chi = EXCLUDED.dia_chi,
+            sdt = EXCLUDED.sdt,
+            email = EXCLUDED.email,
             han_the = EXCLUDED.han_the,
             updated_at = NOW();
     """
@@ -246,8 +217,6 @@ if st.session_state.user is None:
                     auth_res = login_user(email, password)
                     if auth_res:
                         st.session_state.user = auth_res.user
-                        # Ghi nhật ký đăng nhập
-                        log_activity("LOGIN", f"Email {email} đã truy cập hệ thống.")
                         st.success("Đăng nhập thành công!")
                         time.sleep(0.5)
                         st.rerun()
@@ -261,12 +230,11 @@ st.sidebar.markdown(f"Vai trò: {role_label}")
 
 menu_options = ["🔍 Tra cứu dữ liệu"]
 if is_admin():
-    menu_options += ["📥 Nhập dữ liệu mới", "🗑️ Dọn dẹp dữ liệu", "📜 Nhật ký hoạt động"]
+    menu_options += ["📥 Nhập dữ liệu mới", "🗑️ Dọn dẹp dữ liệu"]
 
 choice = st.sidebar.radio("Menu Chức năng", menu_options)
 
 if st.sidebar.button("🚪 Đăng xuất"):
-    log_activity("LOGOUT", f"Người dùng {st.session_state.user.email} đăng xuất.")
     logout_user()
 
 if choice == "🔍 Tra cứu dữ liệu":
@@ -294,16 +262,20 @@ if choice == "🔍 Tra cứu dữ liệu":
 
     if search_trigger:
         with st.spinner("Đang truy xuất..."):
-            # Ghi nhật ký yêu cầu tra cứu
-            log_activity("SEARCH", f"Tra cứu {stype}: {q_main} | {q_sub}")
-            
             data = search_participants(q_main, q_sub, stype)
             if data:
                 st.success(f"Tìm thấy {len(data)} kết quả.")
-                df_res = pd.DataFrame(data, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "SĐT", "Hạn Thẻ"])
+                # Cập nhật danh sách tiêu đề hiển thị
+                cols = ["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "Địa chỉ", "SĐT", "Email", "Hạn Thẻ"]
+                df_res = pd.DataFrame(data, columns=cols)
+                
+                # Định dạng ngày tháng
                 for date_col in ["Ngày Sinh", "Hạn Thẻ"]:
                     df_res[date_col] = pd.to_datetime(df_res[date_col], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
+                
+                # Masking CCCD
                 df_res['CCCD'] = df_res['CCCD'].apply(lambda x: f"{x[:3]}****{x[-3:]}" if x and len(str(x)) > 6 else x)
+                
                 st.dataframe(df_res, use_container_width=True, hide_index=True)
             else:
                 st.warning("Không tìm thấy kết quả phù hợp.")
@@ -327,7 +299,7 @@ elif choice == "📥 Nhập dữ liệu mới":
                     success_count = count
                 if success_count > 0:
                     st.success(f"✅ Thành công! Đã nạp {success_count:,} dòng.")
-                    log_activity("IMPORT", f"Nạp tệp: {uploaded_file.name} ({len(df_preview)} hàng)")
+                    st.balloons()
         except Exception as e:
             st.error(f"Lỗi: {e}")
 
@@ -337,27 +309,3 @@ elif choice == "🗑️ Dọn dẹp dữ liệu":
     if st.button("Xóa toàn bộ", disabled=not confirm):
         if delete_all_data():
             st.success("Dữ liệu đã được xóa sạch.")
-            log_activity("DELETE", "Thực hiện xóa toàn bộ bảng dữ liệu người tham gia.")
-
-elif choice == "📜 Nhật ký hoạt động":
-    st.subheader("📜 Nhật ký hệ thống (Admin)")
-    conn = get_db_connection()
-    if conn:
-        try:
-            # Truy vấn nhật ký
-            with conn.cursor() as cur:
-                cur.execute("SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 1000")
-                rows = cur.fetchall()
-            
-            if rows:
-                df_logs = pd.DataFrame(rows, columns=["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"])
-                df_logs['Thời gian'] = pd.to_datetime(df_logs['Thời gian']).dt.strftime('%H:%M:%S %d/%m/%Y')
-                st.dataframe(df_logs, use_container_width=True, hide_index=True)
-            else:
-                st.info("Hiện chưa có nhật ký hoạt động nào.")
-                
-        except Exception as e:
-            st.error(f"Lỗi hiển thị nhật ký: {e}")
-            st.info("💡 Mẹo: Hãy chạy lệnh CREATE TABLE và GRANT đầy đủ trong SQL Editor của Supabase.")
-        finally:
-            conn.close()
