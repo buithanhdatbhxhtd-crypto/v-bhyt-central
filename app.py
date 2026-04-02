@@ -16,7 +16,6 @@ st.set_page_config(
 def get_db_connection():
     try:
         # LƯU Ý: Phải sử dụng URI của Connection Pooler (Port 6543)
-        # Ví dụ: postgresql://postgres.[ID]:[PASS]@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres
         conn = psycopg2.connect(st.secrets["SUPABASE_DB_URL"], connect_timeout=10)
         return conn
     except Exception as e:
@@ -88,26 +87,24 @@ def import_excel_to_db(df):
     
     # Bước 2: Tiền xử lý véc-tơ hóa
     with st.spinner("Đang chuẩn hóa dữ liệu..."):
-        # Xử lý Ngày tháng - SỬA LỖI NaT ở đây
+        # Xử lý Ngày tháng
         for col in ['ngay_sinh', 'han_the']:
             if col in df.columns:
-                # Chuyển đổi sang datetime
                 temp_dt = pd.to_datetime(df[col], errors='coerce')
-                # Chuyển sang dạng date và quan trọng là ép NaT về None (NULL trong SQL)
                 df[col] = temp_dt.apply(lambda x: x.date() if pd.notnull(x) else None)
             else:
                 df[col] = None
 
-        # Xử lý Chuỗi
+        # Xử lý Chuỗi - QUAN TRỌNG: Giữ NULL cho CCCD để tránh lỗi Unique
         str_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi']
         for col in str_cols:
             if col in df.columns:
-                # Fillna trước khi ép kiểu string để tránh xuất hiện chữ 'nan'
-                df[col] = df[col].fillna('').astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                # Loại bỏ các giá trị rác thường gặp
-                df[col] = df[col].replace(['nan', 'None', 'NAT', 'NaT', '<NA>'], '')
+                # Ép kiểu và xử lý .0
+                df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                # Thay thế các giá trị trống bằng None (NULL trong DB) thay vì chuỗi rỗng
+                df[col] = df[col].replace(['nan', 'None', 'NAT', 'NaT', '<NA>', ''], None)
             else:
-                df[col] = ''
+                df[col] = None
 
     # Chuyển đổi sang List of Tuples
     data_tuples = list(df[['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'sdt', 'dia_chi', 'han_the']].itertuples(index=False, name=None))
@@ -179,6 +176,7 @@ def main():
                 if data:
                     st.success(f"Tìm thấy {len(data)} bản ghi trong {duration:.3f} giây.")
                     df_res = pd.DataFrame(data, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "SĐT", "Hạn Thẻ"])
+                    # Hiển thị số 0 ở đầu cho các cột mã số trong bảng
                     df_res['CCCD'] = df_res['CCCD'].apply(lambda x: f"{x[:3]}****{x[-3:]}" if x and len(str(x)) > 6 else x)
                     st.dataframe(df_res, use_container_width=True, hide_index=True)
                 else:
@@ -206,7 +204,7 @@ def main():
                     for count in import_excel_to_db(df_preview):
                         percent = count / total
                         progress_bar.progress(percent)
-                        status_text.text(f"Đang xử lý: {count:,} / {total:,} dòng...")
+                        status_text.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
                         success_count = count
                     
                     if success_count > 0:
