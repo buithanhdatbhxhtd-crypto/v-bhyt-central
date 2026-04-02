@@ -329,11 +329,9 @@ elif choice == "🧮 Tiện ích tính toán":
     
     with t1:
         st.subheader("Máy tính bỏ túi")
-        # Sử dụng widget calculator đơn giản bằng input
         calc_exp = st.text_input("Nhập phép tính (VD: 105300 * 5 + 1500000 * 0.22)", placeholder="Nhấn Enter để tính...")
         if calc_exp:
             try:
-                # Chỉ cho phép các ký tự an toàn
                 allowed = set("0123456789+-*/.() ")
                 if all(c in allowed for c in calc_exp):
                     res = eval(calc_exp)
@@ -362,10 +360,14 @@ elif choice == "🧮 Tiện ích tính toán":
             elif i == 4: p = m1_price * 0.5
             else: p = m1_price * 0.4
             prices.append(round(p))
+        
+        # --- FIX LỖI: Đồng nhất độ dài các mảng cho DataFrame ---
+        discount_labels = ["100%", "70%", "60%", "50%"] + ["40%"] * max(0, num_members - 4)
+        discount_labels = discount_labels[:num_members] # Đảm bảo đúng độ dài num_members
             
         df_bhyt = pd.DataFrame({
             "Thứ tự": [f"Người thứ {i}" for i in range(1, num_members + 1)],
-            "Mức giảm": ["100%", "70%", "60%", "50%"] + ["40%"] * (num_members - 4),
+            "Mức giảm": discount_labels,
             "Số tiền/Tháng": [f"{p:,.0f}đ" for p in prices],
             "Số tiền/12 tháng": [f"{p*12:,.0f}đ" for p in prices]
         })
@@ -393,8 +395,6 @@ elif choice == "🧮 Tiện ích tính toán":
                               options=[1, 3, 6, 9, 12], 
                               format_func=lambda x: f"Đóng {x} tháng một lần")
         
-        # Logic tính toán
-        # User defined: Nghèo 50%, Cận nghèo 40%, Dân tộc 30%, Khác 20%
         support_pct = 0.20
         if "nghèo" in support_type.lower():
             support_pct = 0.50 if "hộ nghèo" in support_type.lower() else 0.40
@@ -402,7 +402,7 @@ elif choice == "🧮 Tiện ích tính toán":
             support_pct = 0.30
             
         rate_bhxh = 0.22 # 22%
-        min_base = 1500000 # Chuẩn nghèo nông thôn làm căn cứ hỗ trợ
+        min_base = 1500000 
         
         monthly_total = chosen_income * rate_bhxh
         monthly_support = min_base * rate_bhxh * support_pct
