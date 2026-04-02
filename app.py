@@ -30,50 +30,47 @@ def search_participants(search_query, search_type, limit=100):
     
     cur = conn.cursor()
     try:
-        # Làm sạch input tìm kiếm
+        # Làm sạch input tìm kiếm, loại bỏ khoảng trắng thừa
         q_clean = search_query.strip()
         
         if search_type == "Mã BHXH":
-            # Sử dụng ILIKE và % để tìm kiếm linh hoạt hơn (phòng trường hợp mã có khoảng trắng)
+            # Tìm kiếm chính xác mã số, loại bỏ khoảng trắng trong DB để so khớp
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
-                WHERE ma_so_bhxh ILIKE %s OR ma_so_bhxh = %s
+                WHERE TRIM(ma_so_bhxh) = %s OR ma_so_bhxh ILIKE %s
                 LIMIT %s
             """
-            cur.execute(query, (f"%{q_clean}%", q_clean, limit))
+            cur.execute(query, (q_clean, f"%{q_clean}%", limit))
             
         elif search_type == "CCCD":
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
-                WHERE cccd ILIKE %s OR cccd = %s
+                WHERE TRIM(cccd) = %s OR cccd ILIKE %s
                 LIMIT %s
             """
-            cur.execute(query, (f"%{q_clean}%", q_clean, limit))
+            cur.execute(query, (q_clean, f"%{q_clean}%", limit))
             
-        else: # Tìm kiếm theo Tên (Nâng cấp logic)
+        else: # Tìm kiếm theo Tên (Thu hẹp phạm vi để chính xác hơn)
             # 1. Chuẩn hóa chuỗi tìm kiếm (không dấu, viết thường)
             q_norm = unidecode(q_clean).lower()
-            # 2. Chuỗi tìm kiếm không khoảng trắng
-            q_no_space = q_norm.replace(" ", "")
             
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
                 WHERE 
-                    -- Ưu tiên 1: Khớp chính xác cụm từ không dấu
+                    -- Ưu tiên: Tên chứa toàn bộ cụm từ tìm kiếm (Ví dụ: 'nguyen van quyen')
                     ho_ten_unsigned ILIKE %s 
-                    -- Ưu tiên 2: Khớp khi loại bỏ toàn bộ khoảng trắng (ví dụ: havanly)
-                    OR REPLACE(ho_ten_unsigned, ' ', '') = %s
-                    -- Ưu tiên 3: Độ tương đồng cao (similarity > 0.5)
-                    OR (similarity(ho_ten_unsigned, %s) > 0.5)
+                    -- Hoặc có độ tương đồng cực cao (ngưỡng 0.7 thay vì 0.5 để thu hẹp kết quả)
+                    OR (similarity(ho_ten_unsigned, %s) > 0.7)
                 ORDER BY 
-                    (ho_ten_unsigned = %s) DESC, -- Chính xác tuyệt đối lên đầu
+                    (ho_ten_unsigned = %s) DESC, -- Khớp chính xác tuyệt đối lên đầu
                     similarity(ho_ten_unsigned, %s) DESC
                 LIMIT %s
             """
-            cur.execute(query, (f"%{q_norm}%", q_no_space, q_norm, q_norm, q_norm, limit))
+            # Tham số: %query%, query, query, query, limit
+            cur.execute(query, (f"%{q_norm}%", q_norm, q_norm, q_norm, limit))
         
         return cur.fetchall()
     except Exception as e:
@@ -88,7 +85,7 @@ def import_excel_to_db(df):
     # Chuẩn hóa tên cột
     df.columns = [str(c).strip().lower() for c in df.columns]
     
-    # Ánh xạ tên cột linh hoạt (hỗ trợ file của bạn)
+    # Ánh xạ tên cột linh hoạt
     mapping = {
         'ma so bhxh': 'ma_so_bhxh',
         'ma the bhyt': 'ma_the_bhyt',
@@ -109,7 +106,6 @@ def import_excel_to_db(df):
     cur = conn.cursor()
     try:
         data = []
-        # Kiểm tra cột tối thiểu
         if 'ma_so_bhxh' not in df.columns or 'ho_ten' not in df.columns:
             st.error(f"File thiếu cột 'ma so bhxh' hoặc 'ho ten'. Cột hiện có: {list(df.columns)}")
             return
@@ -122,9 +118,9 @@ def import_excel_to_db(df):
 
             def clean_str(val):
                 if pd.isnull(val): return ""
+                # Giữ nguyên chuỗi, chỉ xử lý trường hợp bị dính .0 do Excel hiểu nhầm là số float
                 s = str(val).strip()
-                # Loại bỏ số thập phân nếu Excel tự hiểu là float (123.0 -> 123)
-                return s.split('.')[0] if '.' in s else s
+                return s.split('.')[0] if s.endswith('.0') else s
 
             data.append((
                 clean_str(row['ma_so_bhxh']), 
@@ -173,9 +169,7 @@ def main():
 
     if mode == "Tra cứu dữ liệu":
         st.subheader("🔍 Tìm kiếm người tham gia")
-        
-        # Thêm hướng dẫn tìm kiếm
-        st.caption("Mẹo: Bạn có thể tìm tên không dấu hoặc viết liền (ví dụ: havanly)")
+        st.caption("Lưu ý: Hệ thống ưu tiên kết quả khớp chính xác cụm từ bạn nhập.")
         
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -193,7 +187,7 @@ def main():
                     st.success(f"Tìm thấy {len(data)} bản ghi trong {duration:.3f} giây.")
                     df_res = pd.DataFrame(data, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "SĐT", "Hạn Thẻ"])
                     
-                    # Data Masking
+                    # Data Masking cho CCCD
                     df_res['CCCD'] = df_res['CCCD'].apply(lambda x: f"{x[:3]}****{x[-3:]}" if x and len(str(x)) > 6 else x)
                     
                     st.dataframe(df_res, use_container_width=True, hide_index=True)
@@ -209,13 +203,17 @@ def main():
 
     else: # Quản trị viên
         st.subheader("📥 Nhập dữ liệu từ Excel (XLSX/XLSB)")
+        st.warning("⚠️ Hệ thống sẽ giữ nguyên các số 0 ở đầu mã số BHXH/CCCD.")
+        
         uploaded_file = st.file_uploader("Chọn tệp dữ liệu", type=["xlsx", "xlsb"])
         if uploaded_file:
             try:
                 engine = 'pyxlsb' if uploaded_file.name.endswith('.xlsb') else None
-                df_preview = pd.read_excel(uploaded_file, engine=engine)
+                # QUAN TRỌNG: dtype=str để không bị mất số 0 đầu
+                df_preview = pd.read_excel(uploaded_file, engine=engine, dtype=str)
+                
                 st.write(f"📊 Phát hiện: **{len(df_preview):,}** hàng dữ liệu.")
-                st.dataframe(df_preview.head(5))
+                st.dataframe(df_preview.head(10)) # Hiện 10 dòng để kiểm tra số 0 đầu
                 
                 if st.button("🚀 Thực hiện nạp vào hệ thống"):
                     progress_bar = st.progress(0)
