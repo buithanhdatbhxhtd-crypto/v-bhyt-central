@@ -51,6 +51,14 @@ def logout_user():
     st.session_state.user = None
     st.rerun()
 
+def update_password(new_password):
+    try:
+        res = supabase.auth.update_user({"password": new_password})
+        return res
+    except Exception as e:
+        st.error(f"Lỗi cập nhật mật khẩu: {e}")
+        return None
+
 def is_admin():
     if not st.session_state.user:
         return False
@@ -223,7 +231,7 @@ st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
 st.sidebar.caption(role_label)
 
-menu = ["📊 Dashboard", "🔍 Tra cứu & Xuất dữ liệu"]
+menu = ["📊 Dashboard", "🔍 Tra cứu & Xuất dữ liệu", "⚙️ Cài đặt tài khoản"]
 if is_admin():
     menu += ["📥 Nhập dữ liệu mới", "📜 Nhật ký hoạt động", "🗑️ Quản lý kho"]
 
@@ -292,6 +300,27 @@ elif choice == "🔍 Tra cứu & Xuất dữ liệu":
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.warning("Không có dữ liệu phù hợp.")
+
+elif choice == "⚙️ Cài đặt tài khoản":
+    st.header("⚙️ Cài đặt tài khoản")
+    st.write(f"Đang đăng nhập với: **{st.session_state.user.email}**")
+    
+    with st.form("change_password_form"):
+        st.subheader("Đổi mật khẩu")
+        new_pwd = st.text_input("Mật khẩu mới", type="password")
+        confirm_pwd = st.text_input("Xác nhận mật khẩu mới", type="password")
+        
+        if st.form_submit_button("Cập nhật mật khẩu"):
+            if len(new_pwd) < 6:
+                st.warning("Mật khẩu phải có ít nhất 6 ký tự.")
+            elif new_pwd != confirm_pwd:
+                st.error("Mật khẩu xác nhận không khớp.")
+            else:
+                with st.spinner("Đang cập nhật..."):
+                    res = update_password(new_pwd)
+                    if res:
+                        st.success("Cập nhật mật khẩu thành công!")
+                        log_activity("CHANGE_PASSWORD", {"status": "success"})
 
 elif choice == "📥 Nhập dữ liệu mới":
     st.header("📥 Nhập dữ liệu hàng loạt")
