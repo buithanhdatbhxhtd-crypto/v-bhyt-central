@@ -88,15 +88,24 @@ def import_excel_to_db(df):
     
     # Bước 2: Tiền xử lý véc-tơ hóa
     with st.spinner("Đang chuẩn hóa dữ liệu..."):
+        # Xử lý Ngày tháng - SỬA LỖI NaT ở đây
         for col in ['ngay_sinh', 'han_the']:
             if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+                # Chuyển đổi sang datetime
+                temp_dt = pd.to_datetime(df[col], errors='coerce')
+                # Chuyển sang dạng date và quan trọng là ép NaT về None (NULL trong SQL)
+                df[col] = temp_dt.apply(lambda x: x.date() if pd.notnull(x) else None)
+            else:
+                df[col] = None
 
+        # Xử lý Chuỗi
         str_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi']
         for col in str_cols:
             if col in df.columns:
-                df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                df[col] = df[col].replace(['nan', 'None', 'NAT', '<NA>'], '')
+                # Fillna trước khi ép kiểu string để tránh xuất hiện chữ 'nan'
+                df[col] = df[col].fillna('').astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                # Loại bỏ các giá trị rác thường gặp
+                df[col] = df[col].replace(['nan', 'None', 'NAT', 'NaT', '<NA>'], '')
             else:
                 df[col] = ''
 
@@ -119,13 +128,12 @@ def import_excel_to_db(df):
     """
     
     # Nạp theo lô (Batch)
-    batch_size = 3000 # Giảm nhẹ để tránh nghẽn kết nối
+    batch_size = 3000 
     total_len = len(data_tuples)
     
     for i in range(0, total_len, batch_size):
         batch = data_tuples[i:i + batch_size]
         
-        # Thử kết nối lại cho mỗi batch để tránh timeout
         conn = get_db_connection()
         if not conn:
             st.error(f"Mất kết nối tại dòng {i:,}. Đang thử lại...")
@@ -146,7 +154,6 @@ def import_excel_to_db(df):
             cur.close()
             conn.close()
         
-        # Nghỉ ngắn để DB "thở"
         time.sleep(0.1)
 
 # --- 5. GIAO DIỆN CHÍNH ---
