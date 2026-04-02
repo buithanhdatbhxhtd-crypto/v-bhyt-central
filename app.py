@@ -73,7 +73,27 @@ def search_participants(search_query, search_type, limit=100):
         cur.close()
         conn.close()
 
-# --- 4. LOGIC NHẬP DỮ LIỆU TỐI ƯU HÓA CAO (CHO 500K DÒNG) ---
+# --- 4. LOGIC XÓA DỮ LIỆU ---
+def delete_all_data():
+    conn = get_db_connection()
+    if not conn:
+        st.error("Lỗi kết nối cơ sở dữ liệu.")
+        return False
+    
+    cur = conn.cursor()
+    try:
+        cur.execute("TRUNCATE TABLE participants RESTART IDENTITY;")
+        conn.commit()
+        return True
+    except Exception as e:
+        st.error(f"Lỗi khi xóa dữ liệu: {e}")
+        conn.rollback()
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+# --- 5. LOGIC NHẬP DỮ LIỆU TỐI ƯU HÓA CAO (CHO 500K DÒNG) ---
 def import_excel_to_db(df):
     # Bước 1: Chuẩn hóa tên cột
     df.columns = [str(c).strip().lower() for c in df.columns]
@@ -95,14 +115,11 @@ def import_excel_to_db(df):
             else:
                 df[col] = None
 
-        # Xử lý Chuỗi - QUAN TRỌNG: Xử lý triệt để các giá trị NaN/Null
+        # Xử lý Chuỗi
         str_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi']
         for col in str_cols:
             if col in df.columns:
-                # 1. Chuyển sang chuỗi, xử lý .0 của Excel
                 df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                # 2. Ép tất cả các dạng "Trống" (bao gồm cả chữ 'nan' sinh ra từ astype(str)) về None
-                # Thêm 'NaN', 'nan', 'NAN' để đảm bảo không bị sót
                 null_values = ['nan', 'None', 'NAT', 'NaT', '<NA>', '', 'NaN', 'NAN', 'null', 'NULL']
                 df[col] = df[col].where(~df[col].isin(null_values), None)
             else:
@@ -110,7 +127,7 @@ def import_excel_to_db(df):
 
     # Chuyển đổi sang List of Tuples
     data_tuples = list(df[['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'sdt', 'dia_chi', 'han_the']].itertuples(index=False, name=None))
-    del df # Giải phóng bộ nhớ ngay để tránh tràn RAM
+    del df # Giải phóng bộ nhớ
 
     sql = """
         INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, dia_chi, han_the)
@@ -155,11 +172,11 @@ def import_excel_to_db(df):
         
         time.sleep(0.1)
 
-# --- 5. GIAO DIỆN CHÍNH ---
+# --- 6. GIAO DIỆN CHÍNH ---
 def main():
     st.title("🏥 Hệ thống Quản lý & Tra cứu BHYT")
     st.sidebar.header("🛡️ Bảng điều khiển")
-    mode = st.sidebar.radio("Chọn chức năng", ["Tra cứu dữ liệu", "Quản trị viên (Nhập dữ liệu)"])
+    mode = st.sidebar.radio("Chọn chức năng", ["Tra cứu dữ liệu", "Quản trị viên (Dữ liệu)"])
 
     if mode == "Tra cứu dữ liệu":
         st.subheader("🔍 Tìm kiếm người tham gia")
@@ -178,42 +195,58 @@ def main():
                 if data:
                     st.success(f"Tìm thấy {len(data)} bản ghi trong {duration:.3f} giây.")
                     df_res = pd.DataFrame(data, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "SĐT", "Hạn Thẻ"])
-                    # Hiển thị số 0 ở đầu cho các cột mã số trong bảng
                     df_res['CCCD'] = df_res['CCCD'].apply(lambda x: f"{x[:3]}****{x[-3:]}" if x and len(str(x)) > 6 else x)
                     st.dataframe(df_res, use_container_width=True, hide_index=True)
                 else:
                     st.warning("Không tìm thấy kết quả phù hợp.")
 
     else: # Quản trị viên
-        st.subheader("📥 Nhập dữ liệu lớn (Tối đa 500.000 hàng)")
-        uploaded_file = st.file_uploader("Chọn tệp Excel (.xlsx, .xlsb)", type=["xlsx", "xlsb"])
-        if uploaded_file:
-            try:
-                engine = 'pyxlsb' if uploaded_file.name.endswith('.xlsb') else None
-                with st.spinner("Đang đọc file..."):
-                    df_preview = pd.read_excel(uploaded_file, engine=engine, dtype=str)
-                
-                st.write(f"📊 Phát hiện: **{len(df_preview):,}** hàng.")
-                
-                if st.button("🚀 Bắt đầu nạp vào hệ thống"):
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
+        st.subheader("⚙️ Quản lý dữ liệu hệ thống")
+        
+        tab1, tab2 = st.tabs(["📥 Nhập dữ liệu mới", "🗑️ Dọn dẹp dữ liệu"])
+        
+        with tab1:
+            st.markdown("##### Nhập dữ liệu lớn (Tối đa 500.000 hàng)")
+            uploaded_file = st.file_uploader("Chọn tệp Excel (.xlsx, .xlsb)", type=["xlsx", "xlsb"])
+            if uploaded_file:
+                try:
+                    engine = 'pyxlsb' if uploaded_file.name.endswith('.xlsb') else None
+                    with st.spinner("Đang đọc file..."):
+                        df_preview = pd.read_excel(uploaded_file, engine=engine, dtype=str)
                     
-                    total = len(df_preview)
-                    success_count = 0
-                    start_import = time.time()
+                    st.write(f"📊 Phát hiện: **{len(df_preview):,}** hàng.")
                     
-                    for count in import_excel_to_db(df_preview):
-                        percent = count / total
-                        progress_bar.progress(percent)
-                        status_text.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
-                        success_count = count
-                    
-                    if success_count > 0:
-                        st.success(f"✅ Thành công! Đã nạp {success_count:,} dòng trong {int(time.time() - start_import)} giây.")
-                        st.balloons()
-            except Exception as e:
-                st.error(f"Lỗi: {e}")
+                    if st.button("🚀 Bắt đầu nạp vào hệ thống"):
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        total = len(df_preview)
+                        success_count = 0
+                        start_import = time.time()
+                        
+                        for count in import_excel_to_db(df_preview):
+                            percent = count / total
+                            progress_bar.progress(percent)
+                            status_text.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
+                            success_count = count
+                        
+                        if success_count > 0:
+                            st.success(f"✅ Thành công! Đã nạp {success_count:,} dòng trong {int(time.time() - start_import)} giây.")
+                            st.balloons()
+                except Exception as e:
+                    st.error(f"Lỗi: {e}")
+        
+        with tab2:
+            st.markdown("##### Xóa toàn bộ dữ liệu hiện có")
+            st.error("⚠️ Cảnh báo: Thao tác này sẽ xóa sạch tất cả thông tin người tham gia trong hệ thống và không thể hoàn tác.")
+            
+            confirm = st.checkbox("Tôi xác nhận muốn xóa toàn bộ dữ liệu để import mới.")
+            if st.button("🔴 Xóa sạch dữ liệu", disabled=not confirm):
+                with st.spinner("Đang xóa..."):
+                    if delete_all_data():
+                        st.success("Đã dọn dẹp sạch sẽ cơ sở dữ liệu. Bây giờ bạn có thể nhập dữ liệu mới.")
+                    else:
+                        st.error("Không thể xóa dữ liệu. Vui lòng thử lại sau.")
 
 if __name__ == "__main__":
     main()
