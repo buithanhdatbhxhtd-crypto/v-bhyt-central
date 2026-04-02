@@ -55,7 +55,7 @@ def is_admin():
 # --- 3. LOGIC TRUY VẤN & NHẬT KÝ ---
 
 def log_activity(action, details):
-    """Ghi lại hoạt động của người dùng vào bảng audit_logs"""
+    """Ghi lại hoạt động của người dùng vào bảng audit_logs một cách an toàn"""
     if not st.session_state.user: 
         return
     
@@ -63,16 +63,6 @@ def log_activity(action, details):
     if conn:
         try:
             with conn.cursor() as cur:
-                # Đảm bảo bảng luôn tồn tại
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS audit_logs (
-                        id BIGSERIAL PRIMARY KEY,
-                        created_at TIMESTAMPTZ DEFAULT NOW(),
-                        email TEXT,
-                        action TEXT,
-                        details TEXT
-                    );
-                """)
                 # Ghi nhật ký với Named Parameters
                 sql = "INSERT INTO audit_logs (email, action, details) VALUES (%(email)s, %(action)s, %(details)s)"
                 cur.execute(sql, {
@@ -82,9 +72,8 @@ def log_activity(action, details):
                 })
             conn.commit()
         except Exception as e:
-            # Nếu lỗi phân quyền, chỉ hiện cảnh báo nhỏ cho Admin ở Sidebar
-            if is_admin():
-                st.sidebar.warning(f"Lưu nhật ký lỗi (Phân quyền): {e}")
+            # Chỉ ghi log lỗi ra console của Streamlit, không hiện chữ vàng lên màn hình để tránh làm phiền
+            print(f"Lỗi hệ thống khi lưu nhật ký: {e}")
             conn.rollback()
         finally:
             conn.close()
@@ -345,7 +334,7 @@ elif choice == "📜 Nhật ký hoạt động":
     conn = get_db_connection()
     if conn:
         try:
-            # 1. Đảm bảo bảng tồn tại
+            # 1. Đảm bảo bảng tồn tại (Một bước kiểm tra nhẹ nhàng)
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -371,6 +360,6 @@ elif choice == "📜 Nhật ký hoạt động":
                 
         except Exception as e:
             st.error(f"Lỗi hiển thị nhật ký: {e}")
-            st.info("Vui lòng đảm bảo bạn đã chạy lệnh SQL Grant Privileges trong Supabase SQL Editor.")
+            st.info("💡 Mẹo: Hãy thử thực hiện một thao tác tìm kiếm bất kỳ trước, sau đó quay lại đây.")
         finally:
             conn.close()
