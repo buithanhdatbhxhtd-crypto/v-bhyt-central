@@ -198,7 +198,7 @@ st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
 st.sidebar.caption(role_label)
 
-menu = ["📊 Dashboard", "🔍 Tra cứu & Xuất file", "⚙️ Tài khoản"]
+menu = ["📊 Dashboard", "🔍 Tra cứu & Xuất file", "🧮 Tiện ích tính toán", "⚙️ Tài khoản"]
 if is_admin():
     menu += ["📥 Nhập dữ liệu", "📜 Nhật ký hệ thống", "👥 Quản lý nhân sự", "🔧 Cấu hình", "🗑️ Dọn dẹp"]
 
@@ -322,6 +322,110 @@ elif choice == "🔍 Tra cứu & Xuất file":
             else: st.warning("Không tìm thấy dữ liệu phù hợp với yêu cầu.")
         finally: conn.close()
 
+elif choice == "🧮 Tiện ích tính toán":
+    st.header("🧮 Công cụ hỗ trợ thu BHYT & BHXH")
+    
+    t1, t2, t3 = st.tabs(["🧮 Máy tính nghiệp vụ", "🏥 Tính BHYT Hộ gia đình", "👵 Tính BHXH Tự nguyện"])
+    
+    with t1:
+        st.subheader("Máy tính bỏ túi")
+        # Sử dụng widget calculator đơn giản bằng input
+        calc_exp = st.text_input("Nhập phép tính (VD: 105300 * 5 + 1500000 * 0.22)", placeholder="Nhấn Enter để tính...")
+        if calc_exp:
+            try:
+                # Chỉ cho phép các ký tự an toàn
+                allowed = set("0123456789+-*/.() ")
+                if all(c in allowed for c in calc_exp):
+                    res = eval(calc_exp)
+                    st.markdown(f"### Kết quả: `{res:,.2f}`")
+                else:
+                    st.error("Biểu thức chứa ký tự không hợp lệ.")
+            except Exception as e:
+                st.error(f"Lỗi tính toán: {e}")
+        
+        st.info("💡 Bạn có thể thực hiện các phép cộng trừ nhân chia trực tiếp để tính tổng tiền thu của nhiều người.")
+
+    with t2:
+        st.subheader("Bảng tính mức đóng BHYT Hộ gia đình")
+        st.caption("Áp dụng mức lương cơ sở: 2.340.000đ (Từ 01/07/2024)")
+        
+        num_members = st.number_input("Số người tham gia trong hộ", 1, 10, 1)
+        base_salary = 2340000
+        rate = 0.045 # 4.5%
+        m1_price = base_salary * rate
+        
+        prices = []
+        for i in range(1, num_members + 1):
+            if i == 1: p = m1_price
+            elif i == 2: p = m1_price * 0.7
+            elif i == 3: p = m1_price * 0.6
+            elif i == 4: p = m1_price * 0.5
+            else: p = m1_price * 0.4
+            prices.append(round(p))
+            
+        df_bhyt = pd.DataFrame({
+            "Thứ tự": [f"Người thứ {i}" for i in range(1, num_members + 1)],
+            "Mức giảm": ["100%", "70%", "60%", "50%"] + ["40%"] * (num_members - 4),
+            "Số tiền/Tháng": [f"{p:,.0f}đ" for p in prices],
+            "Số tiền/12 tháng": [f"{p*12:,.0f}đ" for p in prices]
+        })
+        
+        st.table(df_bhyt)
+        total_year = sum(prices) * 12
+        st.markdown(f"### 💰 Tổng cộng thu (12 tháng): `{total_year:,.0f} VNĐ`")
+        
+        if st.button("Lưu nhật ký tư vấn BHYT"):
+            log_activity("CALC_BHYT", {"members": num_members, "total": total_year})
+            st.toast("Đã lưu hoạt động!")
+
+    with t3:
+        st.subheader("Bảng tính mức đóng BHXH Tự nguyện")
+        
+        col_in, col_support = st.columns(2)
+        with col_in:
+            chosen_income = st.number_input("Mức thu nhập lựa chọn (đ)", 1500000, 36000000, 1500000, 50000, 
+                                           help="Tối thiểu là chuẩn nghèo nông thôn 1.500.000đ")
+        with col_support:
+            support_type = st.selectbox("Đối tượng hỗ trợ", 
+                                        ["Hộ nghèo (50%)", "Hộ cận nghèo (40%)", "Người dân tộc thiểu số (30%)", "Đối tượng khác (20%)"])
+        
+        method = st.selectbox("Phương thức đóng", 
+                              options=[1, 3, 6, 9, 12], 
+                              format_func=lambda x: f"Đóng {x} tháng một lần")
+        
+        # Logic tính toán
+        # User defined: Nghèo 50%, Cận nghèo 40%, Dân tộc 30%, Khác 20%
+        support_pct = 0.20
+        if "nghèo" in support_type.lower():
+            support_pct = 0.50 if "hộ nghèo" in support_type.lower() else 0.40
+        elif "dân tộc" in support_type.lower():
+            support_pct = 0.30
+            
+        rate_bhxh = 0.22 # 22%
+        min_base = 1500000 # Chuẩn nghèo nông thôn làm căn cứ hỗ trợ
+        
+        monthly_total = chosen_income * rate_bhxh
+        monthly_support = min_base * rate_bhxh * support_pct
+        monthly_real = monthly_total - monthly_support
+        
+        total_payment = monthly_real * method
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Mức đóng gốc/Tháng", f"{monthly_total:,.0f}đ")
+        c2.metric("NSNN Hỗ trợ/Tháng", f"-{monthly_support:,.0f}đ")
+        c3.metric("Thực đóng/Tháng", f"{monthly_real:,.0f}đ")
+        
+        st.markdown(f"""
+        <div style="background-color:#f0f2f6; padding:20px; border-radius:10px; border-left: 5px solid #1E88E5;">
+            <h2 style="margin:0; color:#1E88E5;">Tổng tiền thu ({method} tháng): {total_payment:,.0f} VNĐ</h2>
+            <p style="margin:5px 0 0 0; color:#555;">Dựa trên mức thu nhập chọn lựa {chosen_income:,.0f}đ</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button("Lưu nhật ký tư vấn BHXH"):
+            log_activity("CALC_BHXH", {"income": chosen_income, "method": method, "total": total_payment})
+            st.toast("Đã lưu hoạt động!")
+
 elif choice == "📥 Nhập dữ liệu":
     st.header("📥 Nhập liệu hàng loạt (Quản trị)")
     st.info("Hệ thống tự động đồng bộ hóa thông tin dựa trên Mã số BHXH.")
@@ -344,7 +448,7 @@ elif choice == "📜 Nhật ký hệ thống":
     
     col_f1, col_f2 = st.columns([2, 1])
     with col_f1:
-        search_q = st.text_input("🔍 Tìm theo Email, Hành động (VD: EXPORT) hoặc từ khóa")
+        search_q = st.text_input("🔍 Tìm theo Email, Hành động (VD: EXPORT, CALC) hoặc từ khóa")
     with col_f2:
         date_range = st.date_input("Chọn khoảng ngày", value=[date.today() - timedelta(days=7), date.today()])
 
@@ -363,7 +467,7 @@ elif choice == "📜 Nhật ký hệ thống":
                     end_dt = pd.to_datetime(date_range[1]).tz_localize('Asia/Ho_Chi_Minh') + timedelta(days=1)
                     df_logs = df_logs[(df_logs['created_at'] >= start_dt) & (df_logs['created_at'] < end_dt)]
                 
-                # Xử lý tìm kiếm không lỗi logic (Sửa lỗi ValueError axis=1)
+                # Xử lý tìm kiếm không lỗi logic
                 if search_q:
                     mask = df_logs.astype(str).apply(lambda row: row.str.contains(search_q, case=False, na=False).any(), axis=1)
                     df_logs = df_logs[mask]
