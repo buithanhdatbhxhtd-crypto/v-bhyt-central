@@ -52,12 +52,31 @@ def logout_user():
     st.rerun()
 
 def update_password(new_password):
+    """Cập nhật mật khẩu cho chính người đang đăng nhập"""
     try:
         res = supabase.auth.update_user({"password": new_password})
         return res
     except Exception as e:
         st.error(f"Lỗi cập nhật mật khẩu: {e}")
         return None
+
+def admin_reset_user_password(target_email, new_password):
+    """Admin đặt lại mật khẩu cho người dùng khác (Yêu cầu Service Role Key)"""
+    try:
+        # Lấy danh sách users để tìm ID (Vì Admin API cần ID)
+        users = supabase.auth.admin.list_users()
+        user_to_reset = next((u for u in users if u.email == target_email), None)
+        
+        if user_to_reset:
+            supabase.auth.admin.update_user_by_id(
+                user_to_reset.id, 
+                {"password": new_password}
+            )
+            return True, "Cập nhật mật khẩu thành công!"
+        else:
+            return False, "Không tìm thấy Email người dùng này trong hệ thống."
+    except Exception as e:
+        return False, f"Lỗi: {str(e)}. (Lưu ý: Bạn cần dùng Service Role Key trong Secrets để thực hiện quyền này)"
 
 def is_admin():
     if not st.session_state.user:
@@ -233,7 +252,7 @@ st.sidebar.caption(role_label)
 
 menu = ["📊 Dashboard", "🔍 Tra cứu & Xuất dữ liệu", "⚙️ Cài đặt tài khoản"]
 if is_admin():
-    menu += ["📥 Nhập dữ liệu mới", "📜 Nhật ký hoạt động", "🗑️ Quản lý kho"]
+    menu += ["📥 Nhập dữ liệu mới", "📜 Nhật ký hoạt động", "👥 Quản lý người dùng", "🗑️ Quản lý kho"]
 
 choice = st.sidebar.selectbox("Chức năng chính", menu)
 if st.sidebar.button("🚪 Đăng xuất", use_container_width=True):
@@ -321,6 +340,28 @@ elif choice == "⚙️ Cài đặt tài khoản":
                     if res:
                         st.success("Cập nhật mật khẩu thành công!")
                         log_activity("CHANGE_PASSWORD", {"status": "success"})
+
+elif choice == "👥 Quản lý người dùng":
+    st.header("👥 Quản lý tài khoản nhân viên (Admin)")
+    st.info("Chức năng này cho phép Quản trị viên trực tiếp đặt lại mật khẩu cho nhân viên.")
+    
+    with st.form("admin_reset_form"):
+        target_email = st.text_input("Nhập Email nhân viên cần đặt lại mật khẩu")
+        admin_new_pwd = st.text_input("Mật khẩu mới cho nhân viên", type="password")
+        
+        if st.form_submit_button("Đặt lại mật khẩu nhân viên"):
+            if not target_email or not admin_new_pwd:
+                st.warning("Vui lòng nhập đầy đủ Email và Mật khẩu mới.")
+            elif len(admin_new_pwd) < 6:
+                st.warning("Mật khẩu mới phải từ 6 ký tự trở lên.")
+            else:
+                success, msg = admin_reset_user_password(target_email, admin_new_pwd)
+                if success:
+                    st.success(msg)
+                    log_activity("ADMIN_RESET_PWD", {"target": target_email})
+                else:
+                    st.error(msg)
+                    st.caption("Gợi ý: Kiểm tra lại mã Service Role Key trong Secrets.")
 
 elif choice == "📥 Nhập dữ liệu mới":
     st.header("📥 Nhập dữ liệu hàng loạt")
