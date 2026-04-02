@@ -82,9 +82,9 @@ def log_activity(action, details):
                 })
             conn.commit()
         except Exception as e:
-            # Không hiển thị lỗi cho User thường để tránh gây hoang mang
+            # Chỉ Admin mới thấy lỗi này để kiểm tra
             if is_admin():
-                st.sidebar.warning(f"Lỗi ghi log: {e}")
+                st.sidebar.error(f"Lỗi ghi nhật ký: {e}")
             conn.rollback()
         finally:
             conn.close()
@@ -317,7 +317,7 @@ elif choice == "📥 Nhập dữ liệu mới":
             engine = 'pyxlsb' if uploaded_file.name.endswith('.xlsb') else None
             df_preview = pd.read_excel(uploaded_file, engine=engine, dtype=str)
             st.write(f"📊 Phát hiện: **{len(df_preview):,}** hàng.")
-            if st.button("🚀 Thực hiện nạp"):
+            if st.button("🚀 Bắt đầu nạp"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 total = len(df_preview)
@@ -345,7 +345,7 @@ elif choice == "📜 Nhật ký hoạt động":
     conn = get_db_connection()
     if conn:
         try:
-            # 1. Đảm bảo bảng tồn tại trước khi truy vấn
+            # 1. Đảm bảo bảng tồn tại
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -356,16 +356,17 @@ elif choice == "📜 Nhật ký hoạt động":
                         details TEXT
                     );
                 """)
-            conn.commit()
-
-            # 2. Truy vấn dữ liệu thô
-            query = "SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 500"
-            df_logs = pd.read_sql(query, conn)
+                conn.commit()
+                
+                # 2. Truy vấn thủ công thay vì dùng pd.read_sql
+                cur.execute("SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 500")
+                rows = cur.fetchall()
             
-            if not df_logs.empty:
-                # 3. Định dạng lại DataFrame bằng Python
-                df_logs['created_at'] = pd.to_datetime(df_logs['created_at']).dt.strftime('%H:%M:%S %d/%m/%Y')
-                df_logs.columns = ["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"]
+            if rows:
+                # 3. Tạo DataFrame từ kết quả fetchall
+                df_logs = pd.DataFrame(rows, columns=["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"])
+                # Định dạng lại cột thời gian bằng Python (Pandas)
+                df_logs['Thời gian'] = pd.to_datetime(df_logs['Thời gian']).dt.strftime('%H:%M:%S %d/%m/%Y')
                 st.dataframe(df_logs, use_container_width=True, hide_index=True)
             else:
                 st.info("Hiện chưa có nhật ký hoạt động nào.")
