@@ -175,14 +175,13 @@ def save_bhxh_history(msbhxh, data, summary):
         sql_hist = "INSERT INTO bhxh_history (ma_so_bhxh, tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh) VALUES %s"
         execute_values(cur, sql_hist, data)
         
-        # 2. Cập nhật tổng thời gian vào bảng participants (Nếu có bản ghi)
+        # 2. Cập nhật tổng thời gian vào bảng participants
         if summary:
             cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = %s WHERE ma_so_bhxh = %s", (summary, msbhxh))
         
         conn.commit()
         return True
-    except Exception as e:
-        st.error(f"Lỗi SQL: {e}")
+    except Exception:
         return False
     finally: conn.close()
 
@@ -327,13 +326,17 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 for r in rows:
                     with st.container(border=True):
                         col_info, col_act = st.columns([3, 1])
+                        # Làm sạch dữ liệu NaN cho hiển thị
+                        r_sdt = r[6] if r[6] and str(r[6]) != 'None' and str(r[6]) != 'nan' else 'Chưa có'
+                        r_email = r[7] if r[7] and str(r[7]) != 'None' and str(r[7]) != 'nan' else 'Chưa có'
+                        
                         with col_info:
                             st.subheader(f"👤 {r[2]}")
-                            # Hiển thị TỔNG THỜI GIAN ĐÓNG ngay tại đây
+                            # HIỂN THỊ TỔNG THỜI GIAN ĐÓNG NỔI BẬT
                             if r[9]:
-                                st.markdown(f"📈 **Tổng quá trình:** <span style='color:#1E88E5; font-weight:bold;'>{r[9]}</span>", unsafe_allow_html=True)
+                                st.markdown(f"🏆 **Quá trình tham gia:** <span style='background-color:#E3F2FD; color:#1E88E5; padding:5px 12px; border-radius:15px; font-weight:bold; border: 1px solid #1E88E5;'>{r[9]}</span>", unsafe_allow_html=True)
                             else:
-                                st.caption("Chưa có dữ liệu tổng quá trình BHXH.")
+                                st.caption("💡 Chưa có dữ liệu tổng quát. Hãy nạp file PDF quá trình để cập nhật.")
                                 
                             st.write(f"📍 **Địa chỉ:** {r[5]}")
                             st.write(f"🆔 **Mã BHXH:** `{r[0]}` | **CCCD:** `{str(r[4])[:3]}****{str(r[4])[-3:]}`")
@@ -341,8 +344,8 @@ elif choice == "🔍 Tra cứu & Quá trình":
                         
                         with col_act:
                             st.write("**Liên hệ:**")
-                            st.write(f"📞 `{r[6]}`")
-                            st.write(f"📧 `{r[7]}`")
+                            st.write(f"📞 `{r_sdt}`")
+                            st.write(f"📧 `{r_email}`")
 
                         # --- EXPANDER XEM QUÁ TRÌNH ---
                         with st.expander(f"📜 Xem chi tiết lịch sử đóng BHXH của {r[2]}", expanded=False):
@@ -358,7 +361,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
                                 st.table(df_h.style.format({"Mức đóng": "{:,.0f}đ"}))
                                 log_activity("VIEW_HISTORY", {"msbhxh": r[0]})
                             else:
-                                st.warning("Chưa có dữ liệu quá trình. Vui lòng nạp file PDF (Mẫu 07/SBH) trong mục 'Nhập dữ liệu'.")
+                                st.warning("Chưa có dữ liệu bảng chi tiết. Vui lòng nạp file PDF (Mẫu 07/SBH) trong mục 'Nhập dữ liệu'.")
             else: st.warning("Không tìm thấy dữ liệu.")
         finally: conn.close()
 
@@ -406,9 +409,8 @@ elif choice == "📥 Nhập dữ liệu":
                 ms, data, summary = parse_bhxh_pdf(pdf_f)
                 if ms and data:
                     if save_bhxh_history(ms, data, summary):
-                        st.success(f"✅ Đã nạp thành công {len(data)} giai đoạn đóng.")
-                        st.write(f"📌 **Mã số BHXH:** `{ms}`")
-                        if summary: st.info(f"📈 **Tổng quá trình đóng:** {summary}")
+                        st.success(f"✅ Đã cập nhật thành công giai đoạn đóng và tổng quát cho Mã số: {ms}")
+                        if summary: st.info(f"📊 **Dữ liệu tổng hợp:** {summary}")
                         log_activity("IMPORT_PDF", {"ms": ms, "rows": len(data)})
                     else: st.error("Lỗi khi lưu vào cơ sở dữ liệu.")
                 else: st.error("Không tìm thấy dữ liệu hợp lệ trong file PDF này.")
