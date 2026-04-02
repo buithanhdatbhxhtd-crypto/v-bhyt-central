@@ -125,7 +125,6 @@ def parse_bhxh_pdf(pdf_file):
     summary_text = ""
     
     with pdfplumber.open(pdf_file) as pdf:
-        # Lấy văn bản thô để tìm Mã số và Tóm tắt
         full_text = ""
         for page in pdf.pages:
             full_text += page.extract_text() + "\n"
@@ -135,17 +134,20 @@ def parse_bhxh_pdf(pdf_file):
         if match_ms:
             msbhxh = match_ms.group(1).strip()
             
-        # Tìm thời gian tổng cộng (ở cuối file)
-        match_sum = re.search(r"Thời gian đóng BHXH vào quỹ hưu trí.*?là\s*(.*?)\n", full_text, re.DOTALL)
-        if match_sum:
-            summary_text = match_sum.group(1).strip()
+        # Tìm thời gian tổng cộng (Cả BHXH và BHTN)
+        match_bhxh = re.search(r"Thời gian đóng BHXH vào quỹ hưu trí.*?là\s*(.*?)(?:\n|$)", full_text)
+        match_bhtn = re.search(r"Thời gian đóng BHTN vào quỹ BHTN.*?là\s*(.*?)(?:\n|$)", full_text)
+        
+        sums = []
+        if match_bhxh: sums.append(f"BHXH: {match_bhxh.group(1).strip()}")
+        if match_bhtn: sums.append(f"BHTN: {match_bhtn.group(1).strip()}")
+        summary_text = " | ".join(sums)
             
         # Trích xuất bảng
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
                 for row in table:
-                    # Kiểm tra dòng dữ liệu hợp lệ (Cột 0 phải là Từ tháng MM/YYYY)
                     if not row or len(row) < 5 or not row[0]: continue
                     tu_thang = str(row[0]).strip()
                     if not re.match(r"\d{2}/\d{4}", tu_thang): continue
@@ -153,29 +155,30 @@ def parse_bhxh_pdf(pdf_file):
                     try:
                         den_thang = str(row[1]).strip() if row[1] else ""
                         don_vi = str(row[2]).strip().replace('\n', ' ')
-                        
-                        # Xử lý mức đóng (loại bỏ dấu chấm phân cách)
                         muc_raw = str(row[3]).replace('.', '').replace(',', '').strip()
                         muc_dong = float(muc_raw) if muc_raw.isdigit() else 0
-                        
                         ty_le = str(row[6]).strip() if len(row) > 6 and row[6] else ""
                         loai_bh = "BHTN" if "BẢO HIỂM THẤT NGHIỆP" in don_vi.upper() else "BHXH"
-                        
                         history_data.append((msbhxh, tu_thang, den_thang, don_vi, muc_dong, ty_le, loai_bh))
                     except: continue
                     
     return msbhxh, history_data, summary_text
 
-def save_bhxh_history(msbhxh, data):
+def save_bhxh_history(msbhxh, data, summary):
     if not msbhxh or not data: return False
     conn = get_db_connection()
     if not conn: return False
     try:
         cur = conn.cursor()
-        # Xóa lịch sử cũ của mã số này trước khi ghi đè
+        # 1. Lưu chi tiết quá trình
         cur.execute("DELETE FROM bhxh_history WHERE ma_so_bhxh = %s", (msbhxh,))
-        sql = "INSERT INTO bhxh_history (ma_so_bhxh, tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh) VALUES %s"
-        execute_values(cur, sql, data)
+        sql_hist = "INSERT INTO bhxh_history (ma_so_bhxh, tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh) VALUES %s"
+        execute_values(cur, sql_hist, data)
+        
+        # 2. Cập nhật tổng thời gian vào bảng participants (Nếu có bản ghi)
+        if summary:
+            cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = %s WHERE ma_so_bhxh = %s", (summary, msbhxh))
+        
         conn.commit()
         return True
     except Exception as e:
@@ -293,7 +296,8 @@ elif choice == "🔍 Tra cứu & Quá trình":
         if not conn: st.error("Lỗi kết nối CSDL"); st.stop()
         cur = conn.cursor()
         try:
-            fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the"
+            # Lấy thêm cột tong_thoi_gian_bhxh
+            fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
             where, params = "", {'limit': slimit, 'th': st.session_state.threshold}
             if stype == "Mã BHXH":
                 where = "(ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(lq)s)"
@@ -325,6 +329,12 @@ elif choice == "🔍 Tra cứu & Quá trình":
                         col_info, col_act = st.columns([3, 1])
                         with col_info:
                             st.subheader(f"👤 {r[2]}")
+                            # Hiển thị TỔNG THỜI GIAN ĐÓNG ngay tại đây
+                            if r[9]:
+                                st.markdown(f"📈 **Tổng quá trình:** <span style='color:#1E88E5; font-weight:bold;'>{r[9]}</span>", unsafe_allow_html=True)
+                            else:
+                                st.caption("Chưa có dữ liệu tổng quá trình BHXH.")
+                                
                             st.write(f"📍 **Địa chỉ:** {r[5]}")
                             st.write(f"🆔 **Mã BHXH:** `{r[0]}` | **CCCD:** `{str(r[4])[:3]}****{str(r[4])[-3:]}`")
                             st.write(f"📅 **Ngày sinh:** {pd.to_datetime(r[3]).strftime('%d/%m/%Y')} | **Hạn BHYT:** {pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'}")
@@ -334,8 +344,8 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             st.write(f"📞 `{r[6]}`")
                             st.write(f"📧 `{r[7]}`")
 
-                        # --- EXPANDER XEM QUÁ TRÌNH (FIXED) ---
-                        with st.expander(f"📜 Xem chi tiết quá trình đóng BHXH của {r[2]}", expanded=False):
+                        # --- EXPANDER XEM QUÁ TRÌNH ---
+                        with st.expander(f"📜 Xem chi tiết lịch sử đóng BHXH của {r[2]}", expanded=False):
                             cur.execute("""
                                 SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh 
                                 FROM bhxh_history 
@@ -362,7 +372,7 @@ elif choice == "🧮 Tiện ích tính toán":
                 if all(c in set("0123456789+-*/.() ") for c in calc_exp): st.markdown(f"### Kết quả: `{eval(calc_exp):,.2f}`")
             except: st.error("Lỗi tính toán.")
     with t2:
-        num = st.number_input("Số người tham gia", 1, 10, 1)
+        num = st.number_input("Số người tham gia", 1, 10, 5)
         m1 = 2340000 * 0.045
         prices = [round(m1 if i==1 else m1*0.7 if i==2 else m1*0.6 if i==3 else m1*0.5 if i==4 else m1*0.4) for i in range(1, num+1)]
         df_b = pd.DataFrame({"Người thứ": range(1, num+1), "Mức giảm": (["100%", "70%", "60%", "50%"] + ["40%"]*6)[:num], "Số tiền/12 tháng": [p*12 for p in prices]})
@@ -395,10 +405,10 @@ elif choice == "📥 Nhập dữ liệu":
             with st.spinner("Đang đọc PDF..."):
                 ms, data, summary = parse_bhxh_pdf(pdf_f)
                 if ms and data:
-                    if save_bhxh_history(ms, data):
+                    if save_bhxh_history(ms, data, summary):
                         st.success(f"✅ Đã nạp thành công {len(data)} giai đoạn đóng.")
                         st.write(f"📌 **Mã số BHXH:** `{ms}`")
-                        if summary: st.info(f"📈 **Tóm tắt:** {summary}")
+                        if summary: st.info(f"📈 **Tổng quá trình đóng:** {summary}")
                         log_activity("IMPORT_PDF", {"ms": ms, "rows": len(data)})
                     else: st.error("Lỗi khi lưu vào cơ sở dữ liệu.")
                 else: st.error("Không tìm thấy dữ liệu hợp lệ trong file PDF này.")
