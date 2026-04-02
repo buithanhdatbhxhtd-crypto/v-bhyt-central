@@ -48,27 +48,45 @@ def logout_user():
 def is_admin():
     if not st.session_state.user:
         return False
-    # Đảm bảo email của bạn có trong danh sách ADMIN_EMAIL trong Secrets của Streamlit
+    # Email Admin được cấu hình trong Secrets của Streamlit
     admin_emails = ["admin@example.com", st.secrets.get("ADMIN_EMAIL", "")]
     return st.session_state.user.email in admin_emails
 
 # --- 3. LOGIC TRUY VẤN & NHẬT KÝ ---
 
 def log_activity(action, details):
-    if not st.session_state.user: return
+    """Ghi lại hoạt động của người dùng vào bảng audit_logs"""
+    if not st.session_state.user: 
+        return
+    
     conn = get_db_connection()
     if conn:
-        cur = conn.cursor()
         try:
-            cur.execute(
-                "INSERT INTO audit_logs (email, action, details) VALUES (%s, %s, %s)",
-                (st.session_state.user.email, action, str(details))
-            )
+            with conn.cursor() as cur:
+                # Kiểm tra và tự động tạo bảng nếu chưa có (Phòng trường hợp người dùng quên chạy SQL)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS audit_logs (
+                        id BIGSERIAL PRIMARY KEY,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        email TEXT,
+                        action TEXT,
+                        details TEXT
+                    );
+                """)
+                # Sử dụng Named Parameters để an toàn tuyệt đối
+                sql = "INSERT INTO audit_logs (email, action, details) VALUES (%(email)s, %(action)s, %(details)s)"
+                cur.execute(sql, {
+                    'email': st.session_state.user.email,
+                    'action': action,
+                    'details': str(details)
+                })
             conn.commit()
-        except:
-            pass
+        except Exception as e:
+            # Chỉ hiển thị lỗi nếu là Admin để tránh làm phiền nhân viên
+            if is_admin():
+                st.warning(f"Lưu nhật ký lỗi: {e}")
+            conn.rollback()
         finally:
-            cur.close()
             conn.close()
 
 def search_participants(search_query, search_type, limit=100):
@@ -77,7 +95,6 @@ def search_participants(search_query, search_type, limit=100):
     cur = conn.cursor()
     try:
         q_clean = search_query.strip()
-        # Chuyển sang dùng Named Placeholders (%(name)s) để tránh lỗi index
         if search_type == "Mã BHXH":
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
@@ -214,9 +231,9 @@ if st.session_state.user is None:
                     if auth_res:
                         st.session_state.user = auth_res.user
                         # GHI NHẬT KÝ ĐĂNG NHẬP
-                        log_activity("LOGIN", f"Người dùng {email} đăng nhập thành công.")
+                        log_activity("LOGIN", f"Đăng nhập thành công từ {email}")
                         st.success("Đăng nhập thành công!")
-                        time.sleep(1)
+                        time.sleep(0.5)
                         st.rerun()
     st.stop()
 
@@ -246,7 +263,7 @@ if choice == "🔍 Tra cứu dữ liệu":
 
     if q:
         with st.spinner("Đang truy xuất..."):
-            # GHI NHẬT KÝ TRUY VẤN (Ghi trước khi thực hiện để đảm bảo luôn lưu lại yêu cầu)
+            # Ghi nhật ký yêu cầu tìm kiếm
             log_activity("SEARCH_REQUEST", f"Tra cứu {stype}: {q}")
             
             data = search_participants(q, stype)
@@ -296,6 +313,7 @@ elif choice == "📜 Nhật ký hoạt động":
     conn = get_db_connection()
     if conn:
         try:
+            # Sửa lỗi Alias dùng nháy kép ""
             query = """
                 SELECT 
                     created_at AS "Thời gian", 
@@ -304,11 +322,12 @@ elif choice == "📜 Nhật ký hoạt động":
                     details AS "Chi tiết" 
                 FROM audit_logs 
                 ORDER BY id DESC 
-                LIMIT 500
+                LIMIT 1000
             """
             df_logs = pd.read_sql(query, conn)
             st.dataframe(df_logs, use_container_width=True)
         except Exception as e:
             st.error(f"Lỗi truy vấn nhật ký: {e}")
+            st.info("Gợi ý: Nếu bảng chưa tồn tại, hãy thử thực hiện một thao tác bất kỳ (như tìm kiếm) để hệ thống tự tạo bảng nhật ký.")
         finally:
             conn.close()
