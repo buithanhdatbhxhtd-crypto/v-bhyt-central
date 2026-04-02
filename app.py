@@ -89,12 +89,11 @@ def log_activity(action, details):
         finally:
             conn.close()
 
-def search_participants(search_query, search_type, limit=100):
+def search_participants(q_main, q_sub, search_type, limit=100):
     conn = get_db_connection()
     if not conn: return []
     cur = conn.cursor()
     try:
-        q_clean = search_query.strip()
         if search_type == "Mã BHXH":
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
@@ -102,7 +101,8 @@ def search_participants(search_query, search_type, limit=100):
                 WHERE ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(like_q)s 
                 LIMIT %(limit)s
             """
-            cur.execute(query, {'q': q_clean, 'like_q': f"%{q_clean}", 'limit': limit})
+            cur.execute(query, {'q': q_main.strip(), 'like_q': f"%{q_main.strip()}", 'limit': limit})
+            
         elif search_type == "CCCD":
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
@@ -110,23 +110,40 @@ def search_participants(search_query, search_type, limit=100):
                 WHERE cccd = %(q)s OR cccd ILIKE %(like_q)s 
                 LIMIT %(limit)s
             """
-            cur.execute(query, {'q': q_clean, 'like_q': f"%{q_clean}", 'limit': limit})
-        else:
-            q_norm = unidecode(q_clean).lower()
-            query = """
+            cur.execute(query, {'q': q_main.strip(), 'like_q': f"%{q_main.strip()}", 'limit': limit})
+            
+        else: # Tên & Ngày sinh
+            name_norm = unidecode(q_main.strip()).lower()
+            dob_clean = q_sub.strip().replace("/", "").replace("-", "").replace(" ", "")
+            
+            # Logic SQL linh hoạt cho Ngày sinh
+            dob_filter = ""
+            params = {'name': name_norm, 'like_name': f"%{name_norm}%", 'limit': limit}
+            
+            if dob_clean:
+                if len(dob_clean) == 4: # Tìm theo năm sinh
+                    dob_filter = "AND TO_CHAR(ngay_sinh, 'YYYY') = %(dob)s"
+                    params['dob'] = dob_clean
+                else: # Tìm theo ngày đầy đủ (viết liền hoặc có gạch)
+                    dob_filter = "AND (TO_CHAR(ngay_sinh, 'DDMMYYYY') = %(dob)s OR TO_CHAR(ngay_sinh, 'YYYYMMDD') = %(dob)s)"
+                    params['dob'] = dob_clean
+
+            query = f"""
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
-                WHERE 
-                    ho_ten_unsigned = %(q)s 
-                    OR ho_ten_unsigned ILIKE %(like_q)s 
-                    OR (similarity(ho_ten_unsigned, %(q)s) > 0.85)
+                WHERE (
+                    ho_ten_unsigned = %(name)s 
+                    OR ho_ten_unsigned ILIKE %(like_name)s 
+                    OR (similarity(ho_ten_unsigned, %(name)s) > 0.85)
+                ) {dob_filter}
                 ORDER BY 
-                    (ho_ten_unsigned = %(q)s) DESC, 
-                    (ho_ten_unsigned ILIKE %(like_q)s) DESC, 
-                    similarity(ho_ten_unsigned, %(q)s) DESC
+                    (ho_ten_unsigned = %(name)s) DESC, 
+                    (ho_ten_unsigned ILIKE %(like_name)s) DESC, 
+                    similarity(ho_ten_unsigned, %(name)s) DESC
                 LIMIT %(limit)s
             """
-            cur.execute(query, {'q': q_norm, 'like_q': f"%{q_norm}%", 'limit': limit})
+            cur.execute(query, params)
+            
         return cur.fetchall()
     finally:
         cur.close()
@@ -255,18 +272,33 @@ if st.sidebar.button("🚪 Đăng xuất"):
 
 if choice == "🔍 Tra cứu dữ liệu":
     st.subheader("🔍 Tra cứu người tham gia BHYT")
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        q = st.text_input("Tìm kiếm...", placeholder="Tên, Mã BHXH hoặc số CCCD")
-    with col2:
-        stype = st.selectbox("Loại tìm kiếm", ["Tên", "Mã BHXH", "CCCD"])
+    
+    col_sel, col_empty = st.columns([1, 3])
+    with col_sel:
+        stype = st.selectbox("Loại tìm kiếm", ["Tên & Ngày sinh", "Mã BHXH", "CCCD"])
+    
+    if stype == "Tên & Ngày sinh":
+        col_name, col_dob = st.columns([2, 1])
+        with col_name:
+            q_name = st.text_input("Họ tên", placeholder="Ví dụ: Bùi Thành Đạt hoặc buithanhdat")
+        with col_dob:
+            q_dob = st.text_input("Ngày/Năm sinh", placeholder="Ví dụ: 1988 hoặc 22/01/1988")
+        
+        search_trigger = q_name # Kích hoạt khi có nhập tên
+        q_main = q_name
+        q_sub = q_dob
+    else:
+        q_val = st.text_input(f"Nhập {stype}", placeholder=f"Nhập {stype} cần tìm...")
+        search_trigger = q_val
+        q_main = q_val
+        q_sub = ""
 
-    if q:
+    if search_trigger:
         with st.spinner("Đang truy xuất..."):
             # Ghi nhật ký yêu cầu tra cứu
-            log_activity("SEARCH", f"Tra cứu {stype}: {q}")
+            log_activity("SEARCH", f"Tra cứu {stype}: {q_main} | {q_sub}")
             
-            data = search_participants(q, stype)
+            data = search_participants(q_main, q_sub, stype)
             if data:
                 st.success(f"Tìm thấy {len(data)} kết quả.")
                 df_res = pd.DataFrame(data, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "SĐT", "Hạn Thẻ"])
@@ -275,7 +307,7 @@ if choice == "🔍 Tra cứu dữ liệu":
                 df_res['CCCD'] = df_res['CCCD'].apply(lambda x: f"{x[:3]}****{x[-3:]}" if x and len(str(x)) > 6 else x)
                 st.dataframe(df_res, use_container_width=True, hide_index=True)
             else:
-                st.warning("Không tìm thấy kết quả.")
+                st.warning("Không tìm thấy kết quả phù hợp.")
 
 elif choice == "📥 Nhập dữ liệu mới":
     st.subheader("📥 Nhập dữ liệu hàng loạt (Admin)")
@@ -326,12 +358,12 @@ elif choice == "📜 Nhật ký hoạt động":
                 """)
             conn.commit()
 
-            # 2. Truy vấn dữ liệu thô (Không dùng SQL Alias tiếng Việt để tránh lỗi mã hóa)
+            # 2. Truy vấn dữ liệu thô
             query = "SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 500"
             df_logs = pd.read_sql(query, conn)
             
             if not df_logs.empty:
-                # 3. Định dạng lại DataFrame bằng Python (An toàn hơn SQL Alias)
+                # 3. Định dạng lại DataFrame bằng Python
                 df_logs['created_at'] = pd.to_datetime(df_logs['created_at']).dt.strftime('%H:%M:%S %d/%m/%Y')
                 df_logs.columns = ["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"]
                 st.dataframe(df_logs, use_container_width=True, hide_index=True)
