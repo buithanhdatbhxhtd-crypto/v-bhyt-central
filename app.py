@@ -311,11 +311,18 @@ elif choice == "📜 Nhật ký hệ thống":
             query = "SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 1000"
             df_logs = pd.read_sql(query, conn)
             if not df_logs.empty:
+                # 1. Chuyển múi giờ
                 df_logs['created_at'] = pd.to_datetime(df_logs['created_at']).dt.tz_convert('Asia/Ho_Chi_Minh').dt.strftime('%H:%M:%S %d/%m/%Y')
-                df_logs['details'] = df_logs['details'].apply(lambda x: json.dumps(x, ensure_ascii=False))
+                # 2. Xử lý hiển thị JSON
+                df_logs['details'] = df_logs['details'].apply(lambda x: json.dumps(x, ensure_ascii=False) if x else "")
                 df_logs.columns = ["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"]
+                
+                # 3. SỬA LỖI TÌM KIẾM (Fixed ValueError)
                 if search_q:
-                    df_logs = df_logs[df_logs.astype(str).apply(lambda x: search_q.lower() in x.str.lower()).any(axis=1)]
+                    # Tạo mask lọc bằng cách kiểm tra search_q trong từng dòng
+                    mask = df_logs.astype(str).apply(lambda row: row.str.contains(search_q, case=False, na=False).any(), axis=1)
+                    df_logs = df_logs[mask]
+                
                 st.dataframe(df_logs, use_container_width=True, hide_index=True)
             else: st.info("Hệ thống chưa có nhật ký.")
         finally: conn.close()
