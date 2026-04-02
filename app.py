@@ -101,26 +101,65 @@ def get_advanced_stats():
     stats = {}
     try:
         with conn.cursor() as cur:
-            # Thống kê cơ bản
             cur.execute("SELECT COUNT(*) FROM participants")
             stats['total'] = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM participants WHERE han_the < CURRENT_DATE")
             stats['expired'] = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM participants WHERE han_the >= CURRENT_DATE AND han_the <= CURRENT_DATE + INTERVAL '30 days'")
             stats['expiring'] = cur.fetchone()[0]
-            
-            # Thống kê chất lượng dữ liệu (Thiếu CCCD hoặc SĐT)
-            cur.execute("SELECT COUNT(*) FROM participants WHERE cccd IS NULL OR sdt IS NULL")
+            cur.execute("SELECT COUNT(*) FROM participants WHERE cccd IS NULL OR cccd = ''")
             stats['incomplete'] = cur.fetchone()[0]
         return stats
     finally: conn.close()
+
+def import_db_logic(df):
+    """Nạp dữ liệu số lượng lớn (Upsert)"""
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    mapping = {
+        'ma so bhxh': 'ma_so_bhxh', 'mã số bhxh': 'ma_so_bhxh', 'msbhxh': 'ma_so_bhxh',
+        'ma the bhyt': 'ma_the_bhyt', 'mã thẻ bhyt': 'ma_the_bhyt',
+        'ho ten': 'ho_ten', 'họ tên': 'ho_ten', 'ngay sinh': 'ngay_sinh',
+        'cccd': 'cccd', 'socmnd': 'cccd', 'sdt': 'sdt', 'so dien thoai': 'sdt',
+        'diachilh': 'dia_chi', 'địa chỉ': 'dia_chi', 'hantheden': 'han_the', 'hạn thẻ': 'han_the', 'email': 'email'
+    }
+    df = df.rename(columns=mapping)
+    target = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'dia_chi', 'sdt', 'email', 'han_the']
+    for col in target:
+        if col not in df.columns: df[col] = None
+
+    for col in ['ngay_sinh', 'han_the']:
+        df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).apply(lambda x: x.date() if pd.notnull(x) else None)
+
+    for col in ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi', 'email']:
+        df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        df[col] = df[col].where(~df[col].isin(['nan', 'None', 'NAT', 'NaT', '']), None)
+
+    data = list(df[target].itertuples(index=False, name=None))
+    sql = """
+        INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
+        VALUES %s
+        ON CONFLICT (ma_so_bhxh) DO UPDATE SET
+            ma_the_bhyt = EXCLUDED.ma_the_bhyt, ho_ten = EXCLUDED.ho_ten, ngay_sinh = EXCLUDED.ngay_sinh,
+            cccd = EXCLUDED.cccd, dia_chi = EXCLUDED.dia_chi, sdt = EXCLUDED.sdt,
+            email = EXCLUDED.email, han_the = EXCLUDED.han_the, updated_at = NOW();
+    """
+    batch_size = 5000
+    for i in range(0, len(data), batch_size):
+        batch = data[i:i + batch_size]
+        conn = get_db_connection()
+        if not conn: break
+        with conn.cursor() as cur:
+            execute_values(cur, sql, batch)
+            conn.commit()
+        conn.close()
+        yield min(i + batch_size, len(data))
 
 # --- 5. GIAO DIỆN CHÍNH ---
 
 if 'user' not in st.session_state:
     st.session_state.user = None
 if 'threshold' not in st.session_state:
-    st.session_state.threshold = 0.85 # Độ chính xác mặc định
+    st.session_state.threshold = 0.85
 
 if st.session_state.user is None:
     st.markdown("<h1 style='text-align: center; color: #1E88E5;'>🏥 V-BHYT Central Pro</h1>", unsafe_allow_html=True)
@@ -139,7 +178,7 @@ if st.session_state.user is None:
                         st.rerun()
     st.stop()
 
-# --- SIDEBAR NÂNG CẤP ---
+# --- SIDEBAR ---
 st.sidebar.title("🛡️ V-BHYT PRO")
 st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
@@ -154,23 +193,20 @@ if st.sidebar.button("🚪 Đăng xuất", use_container_width=True):
     log_activity("LOGOUT", {"status": "success"})
     logout_user()
 
-# --- NỘI DUNG CHI TIẾT ---
+# --- NỘI DUNG ---
 
 if choice == "📊 Dashboard":
     st.header("📊 Phân tích & Thống kê hệ thống")
     stats = get_advanced_stats()
     if stats:
-        # Hàng 1: Chỉ số chính
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Tổng bản ghi", f"{stats['total']:,}")
         c2.metric("Đã hết hạn", f"{stats['expired']:,}", delta_color="inverse")
         c3.metric("Sắp hết hạn", f"{stats['expiring']:,}")
-        c4.metric("Dữ liệu thiếu", f"{stats['incomplete']:,}", delta="Cần bổ sung", delta_color="off")
+        c4.metric("Thiếu CCCD", f"{stats['incomplete']:,}", delta="Cần bổ sung", delta_color="off")
         
-        # Hàng 2: Biểu đồ trực quan
         st.write("---")
         col_chart1, col_chart2 = st.columns(2)
-        
         with col_chart1:
             st.subheader("📍 Tỷ lệ trạng thái thẻ")
             df_pie = pd.DataFrame({
@@ -180,13 +216,12 @@ if choice == "📊 Dashboard":
             fig_pie = px.pie(df_pie, values='Số lượng', names='Trạng thái', hole=0.4, 
                              color_discrete_sequence=px.colors.qualitative.Pastel)
             st.plotly_chart(fig_pie, use_container_width=True)
-
         with col_chart2:
-            st.subheader("🔔 Hành động cần ưu tiên")
-            if stats['incomplete'] > 0:
-                st.warning(f"Có {stats['incomplete']} người tham gia chưa có CCCD hoặc SĐT. Hãy xuất danh sách và bổ sung.")
+            st.subheader("🔔 Thông báo hệ thống")
             if stats['expiring'] > 0:
-                st.info(f"Có {stats['expiring']} người sắp hết hạn thẻ. Hãy chuẩn bị kế hoạch vận động gia hạn.")
+                st.info(f"Phát hiện {stats['expiring']} trường hợp sắp hết hạn. Hãy lên kế hoạch gia hạn sớm.")
+            if stats['incomplete'] > 0:
+                st.warning(f"Có {stats['incomplete']} bản ghi chưa có mã CCCD. Điều này có thể ảnh hưởng đến tra cứu.")
 
 elif choice == "🔍 Tra cứu & Xuất file":
     st.header("🔍 Tra cứu thông minh")
@@ -206,11 +241,11 @@ elif choice == "🔍 Tra cứu & Xuất file":
 
     if st.button("🚀 Thực hiện tra cứu", use_container_width=True):
         conn = get_db_connection()
+        if not conn: st.error("Lỗi kết nối CSDL"); st.stop()
         cur = conn.cursor()
         try:
             fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the"
-            where = ""
-            params = {'limit': slimit, 'th': st.session_state.threshold}
+            where, params = "", {'limit': slimit, 'th': st.session_state.threshold}
             
             if stype == "Mã BHXH":
                 where = "(ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(lq)s)"
@@ -243,103 +278,93 @@ elif choice == "🔍 Tra cứu & Xuất file":
                 df = df.fillna("")
                 
                 st.success(f"Tìm thấy {len(df)} kết quả.")
-                
-                # Nút xuất file nâng cao
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df.to_excel(writer, index=False, sheet_name='Data')
-                    header_fmt = writer.book.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
-                    for col_num, value in enumerate(df.columns.values):
-                        writer.sheets['Data'].write(0, col_num, value, header_fmt)
-                
                 st.download_button("📥 Tải về Excel (.xlsx)", output.getvalue(), f"BHYT_{datetime.now().strftime('%Y%m%d')}.xlsx")
                 st.dataframe(df, use_container_width=True, hide_index=True)
-            else:
-                st.warning("Không tìm thấy dữ liệu.")
+            else: st.warning("Không tìm thấy dữ liệu.")
+        finally: conn.close()
+
+elif choice == "📥 Nhập dữ liệu":
+    st.header("📥 Nhập liệu hàng loạt")
+    st.info("Hệ thống tự động đồng bộ dựa trên Mã số BHXH. Dữ liệu mới sẽ cập nhật bản ghi cũ.")
+    f = st.file_uploader("Chọn file Excel (.xlsx, .xlsb)", type=["xlsx", "xlsb"])
+    if f:
+        df_new = pd.read_excel(f, engine='pyxlsb' if f.name.endswith('.xlsb') else None, dtype=str)
+        st.write(f"📦 Phát hiện: **{len(df_new):,}** hàng.")
+        if st.button("🚀 Bắt đầu cập nhật"):
+            p, t = st.progress(0), st.empty()
+            total = len(df_new)
+            for count in import_db_logic(df_new):
+                p.progress(count / total)
+                t.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
+            log_activity("IMPORT", {"file": f.name, "rows": total})
+            st.success("Cập nhật dữ liệu thành công!"); st.balloons()
+
+elif choice == "📜 Nhật ký hệ thống":
+    st.header("📜 Nhật ký hoạt động")
+    search_q = st.text_input("🔍 Tìm nhanh theo Email hoặc Hành động")
+    conn = get_db_connection()
+    if conn:
+        try:
+            query = "SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 1000"
+            df_logs = pd.read_sql(query, conn)
+            if not df_logs.empty:
+                df_logs['created_at'] = pd.to_datetime(df_logs['created_at']).dt.tz_convert('Asia/Ho_Chi_Minh').dt.strftime('%H:%M:%S %d/%m/%Y')
+                df_logs['details'] = df_logs['details'].apply(lambda x: json.dumps(x, ensure_ascii=False))
+                df_logs.columns = ["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"]
+                if search_q:
+                    df_logs = df_logs[df_logs.astype(str).apply(lambda x: search_q.lower() in x.str.lower()).any(axis=1)]
+                st.dataframe(df_logs, use_container_width=True, hide_index=True)
+            else: st.info("Hệ thống chưa có nhật ký.")
         finally: conn.close()
 
 elif choice == "👥 Quản lý nhân sự":
     st.header("👥 Quản lý tài khoản truy cập")
-    st.info("Chỉ Quản trị viên mới có quyền thực hiện các thao tác này.")
-    
     col_sel, col_act = st.columns([1, 1])
     with col_sel:
-        target_email = st.text_input("Email nhân viên cần quản lý")
-        action = st.selectbox("Hành động", ["Đặt lại mật khẩu", "Xóa tài khoản vĩnh viễn"])
-    
+        target_email = st.text_input("Email nhân viên")
+        action = st.selectbox("Hành động", ["Đặt lại mật khẩu", "Xóa tài khoản"])
     with col_act:
         if action == "Đặt lại mật khẩu":
             new_pwd = st.text_input("Mật khẩu mới", type="password")
-            if st.button("🚀 Thực hiện Cập nhật"):
+            if st.button("🚀 Cập nhật"):
                 if len(new_pwd) < 6: st.warning("Mật khẩu tối thiểu 6 ký tự.")
                 else:
                     s, m = admin_manage_user(target_email, "RESET_PWD", new_pwd)
                     if s: st.success(m); log_activity("ADMIN_RESET_PWD", {"target": target_email})
                     else: st.error(m)
-        
-        elif action == "Xóa tài khoản vĩnh viễn":
+        elif action == "Xóa tài khoản":
             st.warning("Hành động này không thể hoàn tác!")
-            confirm_email = st.text_input("Nhập lại email để xác nhận xóa")
             if st.button("🔴 XÁC NHẬN XÓA"):
-                if confirm_email == target_email:
-                    s, m = admin_manage_user(target_email, "DELETE")
-                    if s: st.success(m); log_activity("ADMIN_DELETE_USER", {"target": target_email})
-                    else: st.error(m)
-                else: st.error("Email xác nhận không khớp.")
+                s, m = admin_manage_user(target_email, "DELETE")
+                if s: st.success(m); log_activity("ADMIN_DELETE_USER", {"target": target_email})
+                else: st.error(m)
 
 elif choice == "🔧 Cấu hình":
-    st.header("🔧 Cấu hình tham số hệ thống")
-    st.info("Các thiết lập này ảnh hưởng đến trải nghiệm của toàn bộ người dùng.")
-    
-    new_threshold = st.slider("Độ nhạy tìm kiếm tên (Similarity Threshold)", 0.5, 0.95, st.session_state.threshold, 0.05,
-                              help="Số càng thấp thì kết quả tìm kiếm càng rộng (nhưng dễ bị sai lệch). Mặc định 0.85")
-    
+    st.header("🔧 Cấu hình hệ thống")
+    new_threshold = st.slider("Độ nhạy tìm kiếm tên", 0.5, 0.95, st.session_state.threshold, 0.05)
     if st.button("Lưu cấu hình"):
         st.session_state.threshold = new_threshold
-        st.success("Đã cập nhật cấu hình hệ thống!")
-        log_activity("UPDATE_CONFIG", {"threshold": new_threshold})
+        st.success("Đã cập nhật!"); log_activity("UPDATE_CONFIG", {"threshold": new_threshold})
 
-elif choice == "📜 Nhật ký hệ thống":
-    st.header("📜 Nhật ký hoạt động chi tiết")
-    conn = get_db_connection()
-    if conn:
-        try:
-            df_logs = pd.read_sql("SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 1000", conn)
-            if not df_logs.empty:
-                df_logs['created_at'] = pd.to_datetime(df_logs['created_at']).dt.tz_convert('Asia/Ho_Chi_Minh').dt.strftime('%H:%M:%S %d/%m/%Y')
-                df_logs['details'] = df_logs['details'].apply(lambda x: json.dumps(x, ensure_ascii=False))
-                df_logs.columns = ["Thời gian (VN)", "Người thực hiện", "Hành động", "Chi tiết"]
-                st.dataframe(df_logs, use_container_width=True, hide_index=True)
-            else: st.info("Hệ thống chưa có nhật ký.")
-        finally: conn.close()
-
-# Các chức năng khác giữ nguyên logic từ bản trước...
 elif choice == "⚙️ Tài khoản":
-    st.header("⚙️ Cài đặt cá nhân")
+    st.header("⚙️ Tài khoản cá nhân")
     with st.form("pwd_form"):
         npwd = st.text_input("Mật khẩu mới", type="password")
         cpwd = st.text_input("Xác nhận", type="password")
-        if st.form_submit_button("Cập nhật mật khẩu"):
+        if st.form_submit_button("Đổi mật khẩu"):
             if npwd == cpwd and len(npwd) >= 6:
                 supabase.auth.update_user({"password": npwd})
                 st.success("Đã đổi mật khẩu!")
-            else: st.error("Lỗi xác nhận hoặc mật khẩu quá ngắn.")
-
-elif choice == "📥 Nhập dữ liệu":
-    st.header("📥 Nhập liệu hàng loạt")
-    f = st.file_uploader("Chọn file Excel", type=["xlsx", "xlsb"])
-    if f:
-        df_new = pd.read_excel(f, engine='pyxlsb' if f.name.endswith('.xlsb') else None, dtype=str)
-        if st.button("Bắt đầu nạp"):
-            p, t = st.progress(0), st.empty()
-            # Tái sử dụng logic import_db từ bản trước...
-            st.success("Chức năng nạp dữ liệu đã sẵn sàng.")
+            else: st.error("Lỗi mật khẩu.")
 
 elif choice == "🗑️ Dọn dẹp":
     st.header("🗑️ Quản lý kho dữ liệu")
-    if st.checkbox("Xác nhận xóa sạch dữ liệu"):
+    if st.checkbox("Xác nhận xóa toàn bộ dữ liệu người tham gia"):
         if st.button("🔴 THỰC HIỆN XÓA"):
             conn = get_db_connection()
             with conn.cursor() as cur: cur.execute("TRUNCATE TABLE participants RESTART IDENTITY")
             conn.commit(); conn.close()
-            st.success("Đã xóa sạch!")
+            st.success("Đã dọn sạch kho dữ liệu!")
