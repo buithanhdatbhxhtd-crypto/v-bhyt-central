@@ -4,7 +4,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 from unidecode import unidecode
 import time
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from supabase import create_client, Client
 import io
 import json
@@ -101,13 +101,15 @@ def get_advanced_stats():
     stats = {}
     try:
         with conn.cursor() as cur:
+            # Thống kê số lượng
             cur.execute("SELECT COUNT(*) FROM participants")
             stats['total'] = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM participants WHERE han_the < CURRENT_DATE")
             stats['expired'] = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM participants WHERE han_the >= CURRENT_DATE AND han_the <= CURRENT_DATE + INTERVAL '30 days'")
             stats['expiring'] = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM participants WHERE cccd IS NULL OR cccd = ''")
+            # Thống kê chất lượng (Thiếu CCCD hoặc SĐT)
+            cur.execute("SELECT COUNT(*) FROM participants WHERE (cccd IS NULL OR cccd = '') OR (sdt IS NULL OR sdt = '')")
             stats['incomplete'] = cur.fetchone()[0]
         return stats
     finally: conn.close()
@@ -203,7 +205,7 @@ if choice == "📊 Dashboard":
         c1.metric("Tổng bản ghi", f"{stats['total']:,}")
         c2.metric("Đã hết hạn", f"{stats['expired']:,}", delta_color="inverse")
         c3.metric("Sắp hết hạn", f"{stats['expiring']:,}")
-        c4.metric("Thiếu CCCD", f"{stats['incomplete']:,}", delta="Cần bổ sung", delta_color="off")
+        c4.metric("Dữ liệu thiếu", f"{stats['incomplete']:,}", delta="CCCD/SĐT", delta_color="off")
         
         st.write("---")
         col_chart1, col_chart2 = st.columns(2)
@@ -217,11 +219,14 @@ if choice == "📊 Dashboard":
                              color_discrete_sequence=px.colors.qualitative.Pastel)
             st.plotly_chart(fig_pie, use_container_width=True)
         with col_chart2:
-            st.subheader("🔔 Thông báo hệ thống")
-            if stats['expiring'] > 0:
-                st.info(f"Phát hiện {stats['expiring']} trường hợp sắp hết hạn. Hãy lên kế hoạch gia hạn sớm.")
-            if stats['incomplete'] > 0:
-                st.warning(f"Có {stats['incomplete']} bản ghi chưa có mã CCCD. Điều này có thể ảnh hưởng đến tra cứu.")
+            st.subheader("🛠️ Chất lượng dữ liệu")
+            df_quality = pd.DataFrame({
+                "Loại": ["Đầy đủ", "Thiếu CCCD/SĐT"],
+                "Số lượng": [stats['total'] - stats['incomplete'], stats['incomplete']]
+            })
+            fig_bar = px.bar(df_quality, x="Loại", y="Số lượng", color="Loại", 
+                             color_discrete_sequence=["#2ecc71", "#e74c3c"])
+            st.plotly_chart(fig_bar, use_container_width=True)
 
 elif choice == "🔍 Tra cứu & Xuất file":
     st.header("🔍 Tra cứu thông minh")
@@ -274,55 +279,78 @@ elif choice == "🔍 Tra cứu & Xuất file":
             if rows:
                 df = pd.DataFrame(rows, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "Địa chỉ", "SĐT", "Email", "Hạn Thẻ"])
                 for c in ["Ngày Sinh", "Hạn Thẻ"]: df[c] = pd.to_datetime(df[c], errors='coerce').dt.strftime('%d/%m/%Y')
-                df['CCCD'] = df['CCCD'].apply(lambda x: f"{str(x)[:3]}****{str(x)[-3:]}" if pd.notnull(x) and len(str(x)) >= 6 else x)
-                df = df.fillna("")
                 
-                st.success(f"Tìm thấy {len(df)} kết quả.")
+                # Nút xuất file kèm theo logging
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df.to_excel(writer, index=False, sheet_name='Data')
-                st.download_button("📥 Tải về Excel (.xlsx)", output.getvalue(), f"BHYT_{datetime.now().strftime('%Y%m%d')}.xlsx")
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                
+                st.success(f"Tìm thấy {len(df)} kết quả.")
+                st.download_button(
+                    label="📥 Tải về Excel (.xlsx)", 
+                    data=output.getvalue(), 
+                    file_name=f"BHYT_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    on_click=lambda: log_activity("EXPORT", {"rows": len(df), "type": "EXCEL"})
+                )
+                
+                # Hiển thị bảo mật
+                df_display = df.copy()
+                df_display['CCCD'] = df_display['CCCD'].apply(lambda x: f"{str(x)[:3]}****{str(x)[-3:]}" if pd.notnull(x) and len(str(x)) >= 6 else x)
+                df_display = df_display.fillna("")
+                st.dataframe(df_display, use_container_width=True, hide_index=True)
             else: st.warning("Không tìm thấy dữ liệu.")
         finally: conn.close()
 
 elif choice == "📥 Nhập dữ liệu":
-    st.header("📥 Nhập liệu hàng loạt")
-    st.info("Hệ thống tự động đồng bộ dựa trên Mã số BHXH. Dữ liệu mới sẽ cập nhật bản ghi cũ.")
+    st.header("📥 Nhập liệu hàng loạt (Admin)")
+    st.info("Hệ thống tự động đồng bộ dựa trên Mã số BHXH. Dữ liệu mới sẽ cập nhật hoặc thêm mới bản ghi.")
     f = st.file_uploader("Chọn file Excel (.xlsx, .xlsb)", type=["xlsx", "xlsb"])
     if f:
         df_new = pd.read_excel(f, engine='pyxlsb' if f.name.endswith('.xlsb') else None, dtype=str)
         st.write(f"📦 Phát hiện: **{len(df_new):,}** hàng.")
-        if st.button("🚀 Bắt đầu cập nhật"):
-            p, t = st.progress(0), st.empty()
+        if st.button("🚀 Bắt đầu cập nhật Database"):
+            p_bar = st.progress(0)
+            p_text = st.empty()
             total = len(df_new)
             for count in import_db_logic(df_new):
-                p.progress(count / total)
-                t.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
+                p_bar.progress(count / total)
+                p_text.text(f"Đang nạp: {count:,} / {total:,} hàng...")
             log_activity("IMPORT", {"file": f.name, "rows": total})
-            st.success("Cập nhật dữ liệu thành công!"); st.balloons()
+            st.success(f"✅ Đã cập nhật thành công {total:,} dòng dữ liệu!"); st.balloons()
 
 elif choice == "📜 Nhật ký hệ thống":
     st.header("📜 Nhật ký hoạt động")
-    search_q = st.text_input("🔍 Tìm nhanh theo Email hoặc Hành động")
+    
+    col_f1, col_f2 = st.columns([2, 1])
+    with col_f1:
+        search_q = st.text_input("🔍 Tìm theo Email hoặc Hành động")
+    with col_f2:
+        date_range = st.date_input("Khoảng thời gian", value=[date.today() - timedelta(days=7), date.today()])
+
     conn = get_db_connection()
     if conn:
         try:
-            query = "SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 1000"
+            query = "SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 2000"
             df_logs = pd.read_sql(query, conn)
             if not df_logs.empty:
-                # 1. Chuyển múi giờ
-                df_logs['created_at'] = pd.to_datetime(df_logs['created_at']).dt.tz_convert('Asia/Ho_Chi_Minh').dt.strftime('%H:%M:%S %d/%m/%Y')
-                # 2. Xử lý hiển thị JSON
-                df_logs['details'] = df_logs['details'].apply(lambda x: json.dumps(x, ensure_ascii=False) if x else "")
-                df_logs.columns = ["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"]
+                # 1. Định dạng dữ liệu
+                df_logs['created_at'] = pd.to_datetime(df_logs['created_at']).dt.tz_convert('Asia/Ho_Chi_Minh')
                 
-                # 3. SỬA LỖI TÌM KIẾM (Fixed ValueError)
+                # 2. Lọc theo ngày
+                if len(date_range) == 2:
+                    start_dt = pd.to_datetime(date_range[0]).tz_localize('Asia/Ho_Chi_Minh')
+                    end_dt = pd.to_datetime(date_range[1]).tz_localize('Asia/Ho_Chi_Minh') + timedelta(days=1)
+                    df_logs = df_logs[(df_logs['created_at'] >= start_dt) & (df_logs['created_at'] < end_dt)]
+                
+                # 3. Lọc theo từ khóa
                 if search_q:
-                    # Tạo mask lọc bằng cách kiểm tra search_q trong từng dòng
                     mask = df_logs.astype(str).apply(lambda row: row.str.contains(search_q, case=False, na=False).any(), axis=1)
                     df_logs = df_logs[mask]
-                
+
+                # 4. Hiển thị
+                df_logs['created_at'] = df_logs['created_at'].dt.strftime('%H:%M:%S %d/%m/%Y')
+                df_logs['details'] = df_logs['details'].apply(lambda x: json.dumps(x, ensure_ascii=False) if x else "")
+                df_logs.columns = ["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"]
                 st.dataframe(df_logs, use_container_width=True, hide_index=True)
             else: st.info("Hệ thống chưa có nhật ký.")
         finally: conn.close()
@@ -350,11 +378,12 @@ elif choice == "👥 Quản lý nhân sự":
                 else: st.error(m)
 
 elif choice == "🔧 Cấu hình":
-    st.header("🔧 Cấu hình hệ thống")
-    new_threshold = st.slider("Độ nhạy tìm kiếm tên", 0.5, 0.95, st.session_state.threshold, 0.05)
+    st.header("🔧 Cấu hình tham số hệ thống")
+    new_threshold = st.slider("Độ nhạy tìm kiếm tên (Threshold)", 0.5, 0.95, st.session_state.threshold, 0.05)
+    st.caption("Gợi ý: 0.85 là mức cân bằng. 0.70 sẽ tìm thấy nhiều kết quả tương tự hơn nhưng dễ bị nhầm.")
     if st.button("Lưu cấu hình"):
         st.session_state.threshold = new_threshold
-        st.success("Đã cập nhật!"); log_activity("UPDATE_CONFIG", {"threshold": new_threshold})
+        st.success("Đã cập nhật cấu hình!"); log_activity("UPDATE_CONFIG", {"threshold": new_threshold})
 
 elif choice == "⚙️ Tài khoản":
     st.header("⚙️ Tài khoản cá nhân")
@@ -364,14 +393,18 @@ elif choice == "⚙️ Tài khoản":
         if st.form_submit_button("Đổi mật khẩu"):
             if npwd == cpwd and len(npwd) >= 6:
                 supabase.auth.update_user({"password": npwd})
-                st.success("Đã đổi mật khẩu!")
-            else: st.error("Lỗi mật khẩu.")
+                st.success("Đã đổi mật khẩu thành công!")
+                log_activity("CHANGE_OWN_PASSWORD", {"status": "success"})
+            else: st.error("Mật khẩu không khớp hoặc quá ngắn.")
 
 elif choice == "🗑️ Dọn dẹp":
     st.header("🗑️ Quản lý kho dữ liệu")
-    if st.checkbox("Xác nhận xóa toàn bộ dữ liệu người tham gia"):
-        if st.button("🔴 THỰC HIỆN XÓA"):
+    st.error("Cảnh báo: Hành động này sẽ xóa sạch dữ liệu người tham gia BHYT khỏi hệ thống!")
+    if st.checkbox("Tôi xác nhận là Admin và muốn xóa toàn bộ."):
+        if st.button("🔴 THỰC HIỆN XÓA SẠCH"):
             conn = get_db_connection()
             with conn.cursor() as cur: cur.execute("TRUNCATE TABLE participants RESTART IDENTITY")
             conn.commit(); conn.close()
+            log_activity("TRUNCATE_DATA", {"scope": "all_participants"})
             st.success("Đã dọn sạch kho dữ liệu!")
+            time.sleep(1); st.rerun()
