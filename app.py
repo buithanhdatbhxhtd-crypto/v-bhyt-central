@@ -48,7 +48,6 @@ def logout_user():
 def is_admin():
     if not st.session_state.user:
         return False
-    # Email Admin được cấu hình trong Secrets của Streamlit
     admin_emails = ["admin@example.com", st.secrets.get("ADMIN_EMAIL", "")]
     return st.session_state.user.email in admin_emails
 
@@ -59,58 +58,35 @@ def search_participants(q_main, q_sub, search_type, limit=100):
     if not conn: return []
     cur = conn.cursor()
     try:
-        # Danh sách các cột cần lấy (Đã thêm dia_chi và email)
+        # Lấy đầy đủ 9 cột thông tin
         select_fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the"
         
         if search_type == "Mã BHXH":
-            query = f"""
-                SELECT {select_fields} 
-                FROM participants 
-                WHERE ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(like_q)s 
-                LIMIT %(limit)s
-            """
+            query = f"SELECT {select_fields} FROM participants WHERE ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(like_q)s LIMIT %(limit)s"
             cur.execute(query, {'q': q_main.strip(), 'like_q': f"%{q_main.strip()}", 'limit': limit})
-            
         elif search_type == "CCCD":
-            query = f"""
-                SELECT {select_fields} 
-                FROM participants 
-                WHERE cccd = %(q)s OR cccd ILIKE %(like_q)s 
-                LIMIT %(limit)s
-            """
+            query = f"SELECT {select_fields} FROM participants WHERE cccd = %(q)s OR cccd ILIKE %(like_q)s LIMIT %(limit)s"
             cur.execute(query, {'q': q_main.strip(), 'like_q': f"%{q_main.strip()}", 'limit': limit})
-            
         else: # Tên & Ngày sinh
             name_norm = unidecode(q_main.strip()).lower()
             dob_clean = q_sub.strip().replace("/", "").replace("-", "").replace(" ", "")
-            
             dob_filter = ""
             params = {'name': name_norm, 'like_name': f"%{name_norm}%", 'limit': limit}
-            
             if dob_clean:
-                if len(dob_clean) == 4: # Năm sinh
+                if len(dob_clean) == 4:
                     dob_filter = "AND TO_CHAR(ngay_sinh, 'YYYY') = %(dob)s"
                     params['dob'] = dob_clean
-                else: # Ngày đầy đủ
+                else:
                     dob_filter = "AND (TO_CHAR(ngay_sinh, 'DDMMYYYY') = %(dob)s OR TO_CHAR(ngay_sinh, 'YYYYMMDD') = %(dob)s)"
                     params['dob'] = dob_clean
 
             query = f"""
-                SELECT {select_fields} 
-                FROM participants 
-                WHERE (
-                    ho_ten_unsigned = %(name)s 
-                    OR ho_ten_unsigned ILIKE %(like_name)s 
-                    OR (similarity(ho_ten_unsigned, %(name)s) > 0.85)
-                ) {dob_filter}
-                ORDER BY 
-                    (ho_ten_unsigned = %(name)s) DESC, 
-                    (ho_ten_unsigned ILIKE %(like_name)s) DESC, 
-                    similarity(ho_ten_unsigned, %(name)s) DESC
+                SELECT {select_fields} FROM participants 
+                WHERE (ho_ten_unsigned = %(name)s OR ho_ten_unsigned ILIKE %(like_name)s OR (similarity(ho_ten_unsigned, %(name)s) > 0.85)) {dob_filter}
+                ORDER BY (ho_ten_unsigned = %(name)s) DESC, (ho_ten_unsigned ILIKE %(like_name)s) DESC, similarity(ho_ten_unsigned, %(name)s) DESC
                 LIMIT %(limit)s
             """
             cur.execute(query, params)
-            
         return cur.fetchall()
     finally:
         cur.close()
@@ -119,35 +95,46 @@ def search_participants(q_main, q_sub, search_type, limit=100):
 # --- 4. LOGIC XỬ LÝ DỮ LIỆU LỚN (ADMIN) ---
 
 def import_excel_to_db(df):
+    # Chuẩn hóa tên cột sang chữ thường và xóa khoảng trắng
     df.columns = [str(c).strip().lower() for c in df.columns]
+    
+    # BỘ TỪ ĐIỂN NHẬN DIỆN CỘT THÔNG MINH (Xử lý tiếng Việt và viết tắt)
     mapping = {
-        'ma so bhxh': 'ma_so_bhxh', 'ma the bhyt': 'ma_the_bhyt',
-        'ho ten': 'ho_ten', 'ngay sinh': 'ngay_sinh',
-        'socmnd': 'cccd', 'sodient': 'sdt',
-        'diachilh': 'dia_chi', 'hantheden': 'han_the',
-        'email': 'email' # Ánh xạ thêm cột email
+        'ma so bhxh': 'ma_so_bhxh', 'mã số bhxh': 'ma_so_bhxh', 'msbhxh': 'ma_so_bhxh',
+        'ma the bhyt': 'ma_the_bhyt', 'mã thẻ bhyt': 'ma_the_bhyt', 'mathe': 'ma_the_bhyt',
+        'ho ten': 'ho_ten', 'họ tên': 'ho_ten', 'họ và tên': 'ho_ten',
+        'ngay sinh': 'ngay_sinh', 'ngày sinh': 'ngay_sinh', 'ns': 'ngay_sinh',
+        'socmnd': 'cccd', 'cccd': 'cccd', 'số cccd': 'cccd', 'cmnd': 'cccd',
+        'sodient': 'sdt', 'so dien thoai': 'sdt', 'số điện thoại': 'sdt', 'sđt': 'sdt', 'số đt': 'sdt', 'phone': 'sdt',
+        'diachilh': 'dia_chi', 'địa chỉ': 'dia_chi', 'dia chi': 'dia_chi', 'địa chỉ liên hệ': 'dia_chi',
+        'hantheden': 'han_the', 'hạn thẻ': 'han_the', 'hạn thẻ đến': 'han_the', 'hạn dùng': 'han_the',
+        'email': 'email', 'thư điện tử': 'email'
     }
+    
+    # Đổi tên các cột dựa trên từ điển
     df = df.rename(columns=mapping)
     
-    with st.spinner("Đang chuẩn hóa dữ liệu..."):
-        for col in ['ngay_sinh', 'han_the']:
-            if col in df.columns:
-                temp_dt = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
-                df[col] = temp_dt.apply(lambda x: x.date() if pd.notnull(x) else None)
-            else:
-                df[col] = None
+    # Đảm bảo các cột đích luôn tồn tại (nếu thiếu thì tạo cột rỗng)
+    target_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'dia_chi', 'sdt', 'email', 'han_the']
+    for col in target_cols:
+        if col not in df.columns:
+            df[col] = None
 
+    with st.spinner("Đang định dạng dữ liệu..."):
+        # Định dạng ngày tháng
+        for col in ['ngay_sinh', 'han_the']:
+            temp_dt = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
+            df[col] = temp_dt.apply(lambda x: x.date() if pd.notnull(x) else None)
+
+        # Định dạng văn bản và số (giữ lại số 0 ở đầu)
         str_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi', 'email']
         for col in str_cols:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                null_values = ['nan', 'None', 'NAT', 'NaT', '<NA>', '', 'NaN', 'NAN', 'null', 'NULL']
-                df[col] = df[col].where(~df[col].isin(null_values), None)
-            else:
-                df[col] = None
+            df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+            null_values = ['nan', 'None', 'NAT', 'NaT', '<NA>', '', 'NaN', 'NAN', 'null', 'NULL']
+            df[col] = df[col].where(~df[col].isin(null_values), None)
 
-    # Tạo Tuple dữ liệu đầy đủ các cột
-    data_tuples = list(df[['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'dia_chi', 'sdt', 'email', 'han_the']].itertuples(index=False, name=None))
+    # Chuyển thành danh sách Tuples để đẩy lên DB
+    data_tuples = list(df[target_cols].itertuples(index=False, name=None))
     del df
 
     sql = """
@@ -247,9 +234,9 @@ if choice == "🔍 Tra cứu dữ liệu":
     if stype == "Tên & Ngày sinh":
         col_name, col_dob = st.columns([2, 1])
         with col_name:
-            q_name = st.text_input("Họ tên", placeholder="Ví dụ: Bùi Thành Đạt hoặc buithanhdat")
+            q_name = st.text_input("Họ tên", placeholder="Ví dụ: Bùi Thành Đạt")
         with col_dob:
-            q_dob = st.text_input("Ngày/Năm sinh", placeholder="Ví dụ: 1988 hoặc 22/01/1988")
+            q_dob = st.text_input("Ngày/Năm sinh", placeholder="1988 hoặc 22/01/1988")
         
         search_trigger = q_name 
         q_main = q_name
@@ -265,15 +252,14 @@ if choice == "🔍 Tra cứu dữ liệu":
             data = search_participants(q_main, q_sub, stype)
             if data:
                 st.success(f"Tìm thấy {len(data)} kết quả.")
-                # Cập nhật danh sách tiêu đề hiển thị
-                cols = ["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "Địa chỉ", "SĐT", "Email", "Hạn Thẻ"]
-                df_res = pd.DataFrame(data, columns=cols)
+                cols_display = ["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "Địa chỉ", "SĐT", "Email", "Hạn Thẻ"]
+                df_res = pd.DataFrame(data, columns=cols_display)
                 
-                # Định dạng ngày tháng
+                # Định dạng ngày hiển thị
                 for date_col in ["Ngày Sinh", "Hạn Thẻ"]:
                     df_res[date_col] = pd.to_datetime(df_res[date_col], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
                 
-                # Masking CCCD
+                # Che bớt số CCCD để bảo mật
                 df_res['CCCD'] = df_res['CCCD'].apply(lambda x: f"{x[:3]}****{x[-3:]}" if x and len(str(x)) > 6 else x)
                 
                 st.dataframe(df_res, use_container_width=True, hide_index=True)
@@ -282,13 +268,17 @@ if choice == "🔍 Tra cứu dữ liệu":
 
 elif choice == "📥 Nhập dữ liệu mới":
     st.subheader("📥 Nhập dữ liệu hàng loạt (Admin)")
-    uploaded_file = st.file_uploader("Chọn tệp (.xlsx, .xlsb)", type=["xlsx", "xlsb"])
+    uploaded_file = st.file_uploader("Chọn tệp Excel (.xlsx, .xlsb)", type=["xlsx", "xlsb"])
     if uploaded_file:
         try:
             engine = 'pyxlsb' if uploaded_file.name.endswith('.xlsb') else None
             df_preview = pd.read_excel(uploaded_file, engine=engine, dtype=str)
             st.write(f"📊 Phát hiện: **{len(df_preview):,}** hàng.")
-            if st.button("🚀 Bắt đầu nạp"):
+            
+            # Kiểm tra nhanh các cột quan trọng
+            st.info("💡 Hệ thống sẽ tự động nhận diện các cột: Họ tên, Số điện thoại, Email, Địa chỉ, Hạn thẻ...")
+            
+            if st.button("🚀 Bắt đầu nạp dữ liệu"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 total = len(df_preview)
@@ -298,14 +288,14 @@ elif choice == "📥 Nhập dữ liệu mới":
                     status_text.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
                     success_count = count
                 if success_count > 0:
-                    st.success(f"✅ Thành công! Đã nạp {success_count:,} dòng.")
+                    st.success(f"✅ Thành công! Đã cập nhật {success_count:,} dòng.")
                     st.balloons()
         except Exception as e:
-            st.error(f"Lỗi: {e}")
+            st.error(f"Lỗi khi đọc file: {e}")
 
 elif choice == "🗑️ Dọn dẹp dữ liệu":
     st.subheader("🗑️ Xóa dữ liệu (Admin)")
     confirm = st.checkbox("Xác nhận xóa sạch dữ liệu hệ thống.")
     if st.button("Xóa toàn bộ", disabled=not confirm):
         if delete_all_data():
-            st.success("Dữ liệu đã được xóa sạch.")
+            st.success("Dữ liệu đã được dọn dẹp sạch sẽ.")
