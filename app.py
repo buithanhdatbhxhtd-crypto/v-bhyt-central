@@ -101,16 +101,19 @@ def get_advanced_stats():
     stats = {}
     try:
         with conn.cursor() as cur:
-            # Thống kê số lượng
+            # Thống kê số lượng bản ghi
             cur.execute("SELECT COUNT(*) FROM participants")
             stats['total'] = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM participants WHERE han_the < CURRENT_DATE")
             stats['expired'] = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM participants WHERE han_the >= CURRENT_DATE AND han_the <= CURRENT_DATE + INTERVAL '30 days'")
             stats['expiring'] = cur.fetchone()[0]
-            # Thống kê chất lượng (Thiếu CCCD hoặc SĐT)
             cur.execute("SELECT COUNT(*) FROM participants WHERE (cccd IS NULL OR cccd = '') OR (sdt IS NULL OR sdt = '')")
             stats['incomplete'] = cur.fetchone()[0]
+            
+            # --- TRUY VẾT XUẤT DỮ LIỆU ---
+            cur.execute("SELECT COUNT(*) FROM audit_logs WHERE action = 'EXPORT'")
+            stats['total_exports'] = cur.fetchone()[0]
         return stats
     finally: conn.close()
 
@@ -205,7 +208,7 @@ if choice == "📊 Dashboard":
         c1.metric("Tổng bản ghi", f"{stats['total']:,}")
         c2.metric("Đã hết hạn", f"{stats['expired']:,}", delta_color="inverse")
         c3.metric("Sắp hết hạn", f"{stats['expiring']:,}")
-        c4.metric("Dữ liệu thiếu", f"{stats['incomplete']:,}", delta="CCCD/SĐT", delta_color="off")
+        c4.metric("Xuất dữ liệu", f"{stats.get('total_exports', 0):,}", delta="Lượt tải", delta_color="off")
         
         st.write("---")
         col_chart1, col_chart2 = st.columns(2)
@@ -280,17 +283,22 @@ elif choice == "🔍 Tra cứu & Xuất file":
                 df = pd.DataFrame(rows, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "Địa chỉ", "SĐT", "Email", "Hạn Thẻ"])
                 for c in ["Ngày Sinh", "Hạn Thẻ"]: df[c] = pd.to_datetime(df[c], errors='coerce').dt.strftime('%d/%m/%Y')
                 
-                # Nút xuất file kèm theo logging
+                # Nút xuất file kèm theo logging CHẮC CHẮN
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df.to_excel(writer, index=False, sheet_name='Data')
                 
                 st.success(f"Tìm thấy {len(df)} kết quả.")
+                
+                # Hàm callback để ghi log khi nhấn tải
+                def handle_export_log():
+                    log_activity("EXPORT", {"rows": len(df), "type": "EXCEL", "query": q_m})
+
                 st.download_button(
                     label="📥 Tải về Excel (.xlsx)", 
                     data=output.getvalue(), 
                     file_name=f"BHYT_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    on_click=lambda: log_activity("EXPORT", {"rows": len(df), "type": "EXCEL"})
+                    on_click=handle_export_log
                 )
                 
                 # Hiển thị bảo mật
@@ -323,7 +331,7 @@ elif choice == "📜 Nhật ký hệ thống":
     
     col_f1, col_f2 = st.columns([2, 1])
     with col_f1:
-        search_q = st.text_input("🔍 Tìm theo Email hoặc Hành động")
+        search_q = st.text_input("🔍 Tìm theo Email hoặc Hành động (VD: EXPORT)")
     with col_f2:
         date_range = st.date_input("Khoảng thời gian", value=[date.today() - timedelta(days=7), date.today()])
 
