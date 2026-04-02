@@ -295,6 +295,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
         if not conn: st.error("Lỗi kết nối CSDL"); st.stop()
         cur = conn.cursor()
         try:
+            # Lấy thêm cột tong_thoi_gian_bhxh
             fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
             where, params = "", {'limit': slimit, 'th': st.session_state.threshold}
             if stype == "Mã BHXH":
@@ -325,11 +326,13 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 for r in rows:
                     with st.container(border=True):
                         col_info, col_act = st.columns([3, 1])
+                        # Làm sạch dữ liệu NaN cho hiển thị
                         r_sdt = r[6] if r[6] and str(r[6]) != 'None' and str(r[6]) != 'nan' else 'Chưa có'
                         r_email = r[7] if r[7] and str(r[7]) != 'None' and str(r[7]) != 'nan' else 'Chưa có'
                         
                         with col_info:
                             st.subheader(f"👤 {r[2]}")
+                            # HIỂN THỊ TỔNG THỜI GIAN ĐÓNG NỔI BẬT
                             if r[9]:
                                 st.markdown(f"🏆 **Quá trình tham gia:** <span style='background-color:#E3F2FD; color:#1E88E5; padding:5px 12px; border-radius:15px; font-weight:bold; border: 1px solid #1E88E5;'>{r[9]}</span>", unsafe_allow_html=True)
                             else:
@@ -344,16 +347,24 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             st.write(f"📞 `{r_sdt}`")
                             st.write(f"📧 `{r_email}`")
 
+                        # --- EXPANDER XEM QUÁ TRÌNH ---
                         with st.expander(f"📜 Xem chi tiết lịch sử đóng BHXH của {r[2]}", expanded=False):
+                            # SỬA LỖI SẮP XẾP: Chuyển tu_thang sang kiểu Date để ORDER BY chính xác theo trình tự tăng dần
                             cur.execute("""
                                 SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh 
                                 FROM bhxh_history 
                                 WHERE ma_so_bhxh = %s 
-                                ORDER BY tu_thang DESC
+                                ORDER BY to_date(tu_thang, 'MM/YYYY') ASC
                             """, (r[0].strip(),))
                             h_rows = cur.fetchall()
                             if h_rows:
                                 df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
+                                
+                                # Tạo Style để dễ phân biệt BHXH và BHTN
+                                def highlight_type(row):
+                                    color = '#f8f9fa' if row['Loại'] == 'BHXH' else '#eef2ff'
+                                    return [f'background-color: {color}'] * len(row)
+                                
                                 st.table(df_h.style.format({"Mức đóng": "{:,.0f}đ"}))
                                 log_activity("VIEW_HISTORY", {"msbhxh": r[0]})
                             else:
