@@ -303,11 +303,17 @@ elif choice == "📜 Nhật ký hoạt động":
     conn = get_db_connection()
     if conn:
         try:
+            # Lấy dữ liệu và thực hiện chuyển đổi múi giờ sang Asia/Ho_Chi_Minh (UTC+7)
             df_logs = pd.read_sql("SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 500", conn)
-            df_logs['created_at'] = pd.to_datetime(df_logs['created_at']).dt.strftime('%H:%M:%S %d/%m/%Y')
-            df_logs['details'] = df_logs['details'].apply(lambda x: json.dumps(x, ensure_ascii=False))
-            df_logs.columns = ["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"]
-            st.dataframe(df_logs, use_container_width=True, hide_index=True)
+            
+            if not df_logs.empty:
+                # Chuyển đổi múi giờ sang giờ Việt Nam trước khi định dạng chuỗi
+                df_logs['created_at'] = pd.to_datetime(df_logs['created_at']).dt.tz_convert('Asia/Ho_Chi_Minh').dt.strftime('%H:%M:%S %d/%m/%Y')
+                df_logs['details'] = df_logs['details'].apply(lambda x: json.dumps(x, ensure_ascii=False))
+                df_logs.columns = ["Thời gian (VN)", "Người thực hiện", "Hành động", "Chi tiết"]
+                st.dataframe(df_logs, use_container_width=True, hide_index=True)
+            else:
+                st.info("Chưa có dữ liệu nhật ký.")
         finally:
             conn.close()
 
