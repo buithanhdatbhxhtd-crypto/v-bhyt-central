@@ -63,7 +63,7 @@ def log_activity(action, details):
     if conn:
         try:
             with conn.cursor() as cur:
-                # Kiểm tra và tự động tạo bảng nếu chưa có (Phòng trường hợp người dùng quên chạy SQL)
+                # Đảm bảo bảng luôn tồn tại
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS audit_logs (
                         id BIGSERIAL PRIMARY KEY,
@@ -73,7 +73,7 @@ def log_activity(action, details):
                         details TEXT
                     );
                 """)
-                # Sử dụng Named Parameters để an toàn tuyệt đối
+                # Ghi nhật ký với Named Parameters
                 sql = "INSERT INTO audit_logs (email, action, details) VALUES (%(email)s, %(action)s, %(details)s)"
                 cur.execute(sql, {
                     'email': st.session_state.user.email,
@@ -82,9 +82,9 @@ def log_activity(action, details):
                 })
             conn.commit()
         except Exception as e:
-            # Chỉ hiển thị lỗi nếu là Admin để tránh làm phiền nhân viên
+            # Không hiển thị lỗi cho User thường để tránh gây hoang mang
             if is_admin():
-                st.warning(f"Lưu nhật ký lỗi: {e}")
+                st.sidebar.warning(f"Lỗi ghi log: {e}")
             conn.rollback()
         finally:
             conn.close()
@@ -230,8 +230,8 @@ if st.session_state.user is None:
                     auth_res = login_user(email, password)
                     if auth_res:
                         st.session_state.user = auth_res.user
-                        # GHI NHẬT KÝ ĐĂNG NHẬP
-                        log_activity("LOGIN", f"Đăng nhập thành công từ {email}")
+                        # Ghi nhật ký đăng nhập ngay lập tức
+                        log_activity("LOGIN", f"Email {email} đã truy cập hệ thống.")
                         st.success("Đăng nhập thành công!")
                         time.sleep(0.5)
                         st.rerun()
@@ -263,8 +263,8 @@ if choice == "🔍 Tra cứu dữ liệu":
 
     if q:
         with st.spinner("Đang truy xuất..."):
-            # Ghi nhật ký yêu cầu tìm kiếm
-            log_activity("SEARCH_REQUEST", f"Tra cứu {stype}: {q}")
+            # Ghi nhật ký yêu cầu tra cứu
+            log_activity("SEARCH", f"Tra cứu {stype}: {q}")
             
             data = search_participants(q, stype)
             if data:
@@ -306,28 +306,39 @@ elif choice == "🗑️ Dọn dẹp dữ liệu":
     if st.button("Xóa toàn bộ", disabled=not confirm):
         if delete_all_data():
             st.success("Dữ liệu đã được xóa sạch.")
-            log_activity("DELETE_ALL", "Thực hiện xóa toàn bộ bảng participants")
+            log_activity("DELETE", "Thực hiện xóa toàn bộ bảng dữ liệu người tham gia.")
 
 elif choice == "📜 Nhật ký hoạt động":
     st.subheader("📜 Nhật ký hệ thống (Admin)")
     conn = get_db_connection()
     if conn:
         try:
-            # Sửa lỗi Alias dùng nháy kép ""
-            query = """
-                SELECT 
-                    created_at AS "Thời gian", 
-                    email AS "Người thực hiện", 
-                    action AS "Hành động", 
-                    details AS "Chi tiết" 
-                FROM audit_logs 
-                ORDER BY id DESC 
-                LIMIT 1000
-            """
+            # 1. Đảm bảo bảng tồn tại trước khi truy vấn
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS audit_logs (
+                        id BIGSERIAL PRIMARY KEY,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        email TEXT,
+                        action TEXT,
+                        details TEXT
+                    );
+                """)
+            conn.commit()
+
+            # 2. Truy vấn dữ liệu thô (Không dùng SQL Alias tiếng Việt để tránh lỗi mã hóa)
+            query = "SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 500"
             df_logs = pd.read_sql(query, conn)
-            st.dataframe(df_logs, use_container_width=True)
+            
+            if not df_logs.empty:
+                # 3. Định dạng lại DataFrame bằng Python (An toàn hơn SQL Alias)
+                df_logs['created_at'] = pd.to_datetime(df_logs['created_at']).dt.strftime('%H:%M:%S %d/%m/%Y')
+                df_logs.columns = ["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"]
+                st.dataframe(df_logs, use_container_width=True, hide_index=True)
+            else:
+                st.info("Hiện chưa có nhật ký hoạt động nào.")
+                
         except Exception as e:
-            st.error(f"Lỗi truy vấn nhật ký: {e}")
-            st.info("Gợi ý: Nếu bảng chưa tồn tại, hãy thử thực hiện một thao tác bất kỳ (như tìm kiếm) để hệ thống tự tạo bảng nhật ký.")
+            st.error(f"Lỗi hiển thị nhật ký: {e}")
         finally:
             conn.close()
