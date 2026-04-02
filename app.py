@@ -82,9 +82,9 @@ def log_activity(action, details):
                 })
             conn.commit()
         except Exception as e:
-            # Chỉ Admin mới thấy lỗi này để kiểm tra
+            # Nếu lỗi phân quyền, chỉ hiện cảnh báo nhỏ cho Admin ở Sidebar
             if is_admin():
-                st.sidebar.error(f"Lỗi ghi nhật ký: {e}")
+                st.sidebar.warning(f"Lưu nhật ký lỗi (Phân quyền): {e}")
             conn.rollback()
         finally:
             conn.close()
@@ -358,14 +358,12 @@ elif choice == "📜 Nhật ký hoạt động":
                 """)
                 conn.commit()
                 
-                # 2. Truy vấn thủ công thay vì dùng pd.read_sql
-                cur.execute("SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 500")
+                # 2. Truy vấn thủ công
+                cur.execute("SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 1000")
                 rows = cur.fetchall()
             
             if rows:
-                # 3. Tạo DataFrame từ kết quả fetchall
                 df_logs = pd.DataFrame(rows, columns=["Thời gian", "Người thực hiện", "Hành động", "Chi tiết"])
-                # Định dạng lại cột thời gian bằng Python (Pandas)
                 df_logs['Thời gian'] = pd.to_datetime(df_logs['Thời gian']).dt.strftime('%H:%M:%S %d/%m/%Y')
                 st.dataframe(df_logs, use_container_width=True, hide_index=True)
             else:
@@ -373,5 +371,6 @@ elif choice == "📜 Nhật ký hoạt động":
                 
         except Exception as e:
             st.error(f"Lỗi hiển thị nhật ký: {e}")
+            st.info("Vui lòng đảm bảo bạn đã chạy lệnh SQL Grant Privileges trong Supabase SQL Editor.")
         finally:
             conn.close()
