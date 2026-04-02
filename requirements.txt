@@ -6,4 +6,4 @@ openpyxl
 pyxlsb
 supabase
 xlsxwriter
-
+plotly
