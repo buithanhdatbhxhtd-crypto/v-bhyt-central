@@ -33,41 +33,42 @@ def search_participants(search_query, search_type, limit=100):
         q_clean = search_query.strip()
         
         if search_type == "Mã BHXH":
+            # Sử dụng ILIKE với % ở đầu để khớp cả trường hợp người dùng gõ thiếu số 0 ở đầu
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
-                WHERE TRIM(ma_so_bhxh) = %s OR ma_so_bhxh ILIKE %s
+                WHERE ma_so_bhxh = %s OR ma_so_bhxh ILIKE %s
                 LIMIT %s
             """
-            cur.execute(query, (q_clean, f"%{q_clean}%", limit))
+            cur.execute(query, (q_clean, f"%{q_clean}", limit))
             
         elif search_type == "CCCD":
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
-                WHERE TRIM(cccd) = %s OR cccd ILIKE %s
+                WHERE cccd = %s OR cccd ILIKE %s
                 LIMIT %s
             """
-            cur.execute(query, (q_clean, f"%{q_clean}%", limit))
+            cur.execute(query, (q_clean, f"%{q_clean}", limit))
             
-        else: # Tìm kiếm theo Tên (Nâng cấp độ chính xác)
+        else: # Tìm kiếm theo Tên (Đã sửa lỗi tuple index và tăng độ chính xác)
             q_norm = unidecode(q_clean).lower()
             
-            # Cải tiến: Chỉ lấy kết quả có chứa cụm từ hoặc độ tương đồng rất cao (> 0.8)
-            # Điều này giúp loại bỏ các trường hợp như "Lương Văn Hiên" ra quá nhiều kết quả họ Lương
+            # Sửa lỗi: Loại bỏ dấu % trong comment để tránh psycopg2 hiểu lầm là placeholder
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
                 WHERE 
-                    ho_ten_unsigned = %s -- Ưu tiên khớp chính xác tuyệt đối
-                    OR ho_ten_unsigned ILIKE %s -- Hoặc chứa cụm từ đó
-                    OR (similarity(ho_ten_unsigned, %s) > 0.8) -- Hoặc rất giống
+                    ho_ten_unsigned = %s -- Khop chinh xac tuyet doi
+                    OR ho_ten_unsigned ILIKE %s -- Khop cum tu lien mach
+                    OR (similarity(ho_ten_unsigned, %s) > 0.85) -- Do tuong dong rat cao
                 ORDER BY 
-                    (ho_ten_unsigned = %s) DESC, -- Chính xác 100% lên đầu
-                    (ho_ten_unsigned ILIKE %s) DESC, -- Khớp cụm từ lên trên
+                    (ho_ten_unsigned = %s) DESC, -- Tuyet doi len dau
+                    (ho_ten_unsigned ILIKE %s) DESC, -- Cum tu len tren
                     similarity(ho_ten_unsigned, %s) DESC
                 LIMIT %s
             """
+            # Tham so truyen vao phai du 7 gia tri tuong ung 7 dau %s
             cur.execute(query, (q_norm, f"%{q_norm}%", q_norm, q_norm, f"%{q_norm}%", q_norm, limit))
         
         return cur.fetchall()
@@ -120,6 +121,7 @@ def import_excel_to_db(df):
         str_cols = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'dia_chi']
         for col in str_cols:
             if col in df.columns:
+                # Giu nguyen so 0 o dau bang cach ep kieu string ngay tu dau
                 df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
                 null_values = ['nan', 'None', 'NAT', 'NaT', '<NA>', '', 'NaN', 'NAN', 'null', 'NULL']
                 df[col] = df[col].where(~df[col].isin(null_values), None)
