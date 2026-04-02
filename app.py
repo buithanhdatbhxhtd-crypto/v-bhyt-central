@@ -62,19 +62,38 @@ def import_excel_to_db(df):
     
     try:
         data = []
+        # Danh sách các cột bắt buộc phải có trong file mẫu chuẩn
+        required_cols = ['ma_so_bhxh', 'ho_ten']
+        for col in required_cols:
+            if col not in df.columns:
+                st.error(f"File thiếu cột bắt buộc: {col}")
+                return
+
         for _, row in df.iterrows():
-            # Chuẩn hóa dữ liệu ngày tháng
-            ngay_sinh = pd.to_datetime(row.get('ngay_sinh')).date() if pd.notnull(row.get('ngay_sinh')) else None
-            han_the = pd.to_datetime(row.get('han_the')).date() if pd.notnull(row.get('han_the')) else None
+            # Xử lý chuẩn hóa dữ liệu ngày tháng (tránh lỗi định dạng Excel)
+            def parse_date(val):
+                if pd.isnull(val) or str(val).strip() == "": return None
+                try:
+                    return pd.to_datetime(val).date()
+                except:
+                    return None
+
+            ngay_sinh = parse_date(row.get('ngay_sinh'))
+            han_the = parse_date(row.get('han_the'))
             
+            # Chuyển đổi mã số sang chuỗi, loại bỏ khoảng trắng
+            def clean_str(val):
+                if pd.isnull(val): return ""
+                return str(val).split('.')[0].strip() # Loại bỏ .0 nếu Excel coi là số float
+
             data.append((
-                str(row['ma_so_bhxh']), 
-                str(row.get('ma_the_bhyt', '')), 
-                str(row['ho_ten']),
+                clean_str(row['ma_so_bhxh']), 
+                clean_str(row.get('ma_the_bhyt', '')), 
+                str(row['ho_ten']).strip(),
                 ngay_sinh,
-                str(row.get('cccd', '')),
-                str(row.get('sdt', '')),
-                str(row.get('dia_chi', '')),
+                clean_str(row.get('cccd', '')),
+                clean_str(row.get('sdt', '')),
+                str(row.get('dia_chi', '')).strip(),
                 han_the
             ))
 
@@ -92,7 +111,7 @@ def import_excel_to_db(df):
                 updated_at = NOW();
         """
         
-        # Xử lý theo từng lô 5000 hàng để tránh quá tải
+        # Xử lý theo từng lô (Batch) để tối ưu hiệu năng cho 110.000+ hàng
         batch_size = 5000
         for i in range(0, len(data), batch_size):
             batch = data[i:i + batch_size]
@@ -101,7 +120,7 @@ def import_excel_to_db(df):
             yield min(i + batch_size, len(data))
             
     except Exception as e:
-        st.error(f"Lỗi xử lý file Excel: {e}")
+        st.error(f"Lỗi xử lý cơ sở dữ liệu: {e}")
         conn.rollback()
     finally:
         cur.close()
@@ -111,7 +130,7 @@ def import_excel_to_db(df):
 def main():
     st.title("🏥 Hệ thống Quản lý & Tra cứu BHYT")
     st.sidebar.header("🛡️ Bảng điều khiển")
-    mode = st.sidebar.radio("Chọn chức năng", ["Tra cứu dữ liệu", "Quản trị viên (Nhập Excel)"])
+    mode = st.sidebar.radio("Chọn chức năng", ["Tra cứu dữ liệu", "Quản trị viên (Nhập dữ liệu)"])
 
     if mode == "Tra cứu dữ liệu":
         st.subheader("🔍 Tìm kiếm người tham gia")
@@ -122,7 +141,7 @@ def main():
             stype = st.selectbox("Tìm kiếm theo", ["Tên", "Mã BHXH", "CCCD"])
 
         if q:
-            with st.spinner("Đang tìm kiếm..."):
+            with st.spinner("Đang tìm kiếm trong kho dữ liệu..."):
                 start_time = time.time()
                 data = search_participants(q, stype)
                 duration = time.time() - start_time
@@ -130,35 +149,43 @@ def main():
                 if data:
                     st.success(f"Tìm thấy {len(data)} bản ghi trong {duration:.3f} giây.")
                     df_res = pd.DataFrame(data, columns=["Mã BHXH", "Thẻ BHYT", "Họ Tên", "Ngày Sinh", "CCCD", "SĐT", "Hạn Thẻ"])
-                    # Che giấu thông tin nhạy cảm
+                    
+                    # Che giấu thông tin nhạy cảm để bảo mật (Data Masking)
                     df_res['CCCD'] = df_res['CCCD'].apply(lambda x: f"{x[:3]}****{x[-3:]}" if x and len(str(x)) > 6 else x)
+                    df_res['SĐT'] = df_res['SĐT'].apply(lambda x: f"{x[:4]}***{x[-3:]}" if x and len(str(x)) > 7 else x)
+                    
                     st.dataframe(df_res, use_container_width=True, hide_index=True)
                 else:
                     st.warning("Không tìm thấy dữ liệu phù hợp.")
 
     else: # Quản trị viên
-        st.subheader("📥 Nhập dữ liệu hàng loạt từ Excel")
-        st.markdown("""
-        **Yêu cầu tệp Excel:** Cần có các cột chính sau: 
-        `ma_so_bhxh`, `ho_ten`, `ngay_sinh`, `ma_the_bhyt`, `cccd`, `sdt`, `dia_chi`, `han_the`.
-        """)
+        st.subheader("📥 Nhập dữ liệu hàng loạt (Hỗ trợ Excel XLSX/XLSB)")
+        st.info("Hệ thống hỗ trợ file mẫu chuẩn .xlsb để xử lý nhanh các tệp dữ liệu lớn.")
         
-        uploaded_file = st.file_uploader("Chọn tệp Excel (.xlsx)", type=["xlsx"])
+        uploaded_file = st.file_uploader("Chọn tệp Excel (.xlsx hoặc .xlsb)", type=["xlsx", "xlsb"])
         if uploaded_file:
-            df_preview = pd.read_excel(uploaded_file)
-            st.write(f"📊 Phát hiện: **{len(df_preview)}** bản ghi.")
-            st.dataframe(df_preview.head(5))
-            
-            if st.button("🚀 Bắt đầu tải lên Database"):
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+            try:
+                # Tự động chọn engine phù hợp (pyxlsb cho file .xlsb)
+                engine = 'pyxlsb' if uploaded_file.name.endswith('.xlsb') else None
+                df_preview = pd.read_excel(uploaded_file, engine=engine)
                 
-                for count in import_excel_to_db(df_preview):
-                    percent = count / len(df_preview)
-                    progress_bar.progress(percent)
-                    status_text.text(f"Đang xử lý: {count}/{len(df_preview)} hàng...")
+                st.write(f"📊 Phát hiện: **{len(df_preview):,}** bản ghi.")
+                st.dataframe(df_preview.head(5))
                 
-                st.success("✅ Đã hoàn thành nhập dữ liệu vào hệ thống!")
+                if st.button("🚀 Bắt đầu nạp dữ liệu vào hệ thống"):
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    total = len(df_preview)
+                    for count in import_excel_to_db(df_preview):
+                        percent = count / total
+                        progress_bar.progress(percent)
+                        status_text.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
+                    
+                    st.success("✅ Đã hoàn thành nạp dữ liệu thành công!")
+                    st.balloons()
+            except Exception as e:
+                st.error(f"Lỗi khi đọc file: {e}. Hãy đảm bảo bạn đã cài đặt 'pyxlsb' trong requirements.txt")
 
 if __name__ == "__main__":
     main()
