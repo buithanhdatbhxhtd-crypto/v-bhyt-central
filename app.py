@@ -15,18 +15,22 @@ st.set_page_config(
 # --- 2. KẾT NỐI DATABASE ---
 def get_db_connection():
     try:
-        # Lấy URI từ Secrets. 
-        # KHUYÊN DÙNG: Sử dụng URI của Connection Pooler (Port 6543) thay vì Port 5432
+        # LƯU Ý QUAN TRỌNG: 
+        # Hãy vào Supabase -> Settings -> Database -> Connection Pooler
+        # Chọn Mode: Transaction và Copy URI mới (thường có Port là 6543)
+        # Dán URI mới này vào Secrets trên Streamlit Cloud thay cho mã cũ.
         conn = psycopg2.connect(st.secrets["SUPABASE_DB_URL"])
         return conn
     except Exception as e:
-        st.error(f"Lỗi kết nối cơ sở dữ liệu: {e}")
+        # Trả về None thay vì hiện lỗi ngay tại đây để logic bên ngoài xử lý
         return None
 
 # --- 3. LOGIC TRUY VẤN DỮ LIỆU ---
 def search_participants(search_query, search_type, limit=50):
     conn = get_db_connection()
-    if not conn: return []
+    if not conn: 
+        st.error("Không thể kết nối cơ sở dữ liệu. Vui lòng kiểm tra cấu hình SUPABASE_DB_URL trong Secrets.")
+        return []
     
     cur = conn.cursor()
     try:
@@ -38,10 +42,11 @@ def search_participants(search_query, search_type, limit=50):
             cur.execute(query, (search_query, limit))
         else: # Tìm kiếm mờ theo tên
             search_norm = unidecode(search_query).lower()
+            # SỬA LỖI: Dùng %% để escape dấu % của toán tử similarity trong PostgreSQL
             query = """
                 SELECT ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, sdt, han_the 
                 FROM participants 
-                WHERE ho_ten_unsigned % %s OR ho_ten_unsigned ILIKE %s
+                WHERE ho_ten_unsigned %% %s OR ho_ten_unsigned ILIKE %s
                 ORDER BY similarity(ho_ten_unsigned, %s) DESC
                 LIMIT %s
             """
@@ -57,43 +62,45 @@ def search_participants(search_query, search_type, limit=50):
 
 # --- 4. LOGIC NHẬP DỮ LIỆU BATCH (ADMIN) ---
 def import_excel_to_db(df):
-    # Tự động ánh xạ tên cột từ file của bạn sang database
+    # Chuẩn hóa tên cột (bỏ khoảng trắng, viết thường) để khớp chính xác
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    
+    # Ánh xạ tên cột linh hoạt hơn dựa trên hình ảnh file mẫu của bạn
     mapping = {
         'ma so bhxh': 'ma_so_bhxh',
         'ma the bhyt': 'ma_the_bhyt',
         'ho ten': 'ho_ten',
         'ngay sinh': 'ngay_sinh',
-        'soCmnd': 'cccd',
-        'soDienT': 'sdt',
-        'diaChiLh': 'dia_chi',
-        'hanTheDen': 'han_the'
+        'socmnd': 'cccd',
+        'sodient': 'sdt',
+        'diachilh': 'dia_chi',
+        'hantheden': 'han_the'
     }
     
-    # Đổi tên cột nếu tìm thấy trong file
     df = df.rename(columns=mapping)
     
     conn = get_db_connection()
-    if not conn: return
-    cur = conn.cursor()
+    if not conn: 
+        st.error("Lỗi kết nối cơ sở dữ liệu khi nạp. Hãy thử dùng Connection Pooler (Port 6543).")
+        return
     
+    cur = conn.cursor()
     try:
         data = []
-        # Kiểm tra các cột tối thiểu cần thiết
         if 'ma_so_bhxh' not in df.columns or 'ho_ten' not in df.columns:
-            st.error("File thiếu các cột quan trọng (Mã số BHXH hoặc Họ tên). Hãy kiểm tra lại tiêu đề cột.")
+            st.error(f"File thiếu cột bắt buộc. Các cột hiện có: {list(df.columns)}")
             return
 
         for _, row in df.iterrows():
             def parse_date(val):
                 if pd.isnull(val) or str(val).strip() == "": return None
-                try:
-                    return pd.to_datetime(val).date()
-                except:
-                    return None
+                try: return pd.to_datetime(val).date()
+                except: return None
 
             def clean_str(val):
                 if pd.isnull(val): return ""
-                return str(val).split('.')[0].strip()
+                s = str(val).strip()
+                return s.split('.')[0] if '.' in s else s
 
             data.append((
                 clean_str(row['ma_so_bhxh']), 
@@ -120,7 +127,7 @@ def import_excel_to_db(df):
                 updated_at = NOW();
         """
         
-        batch_size = 5000
+        batch_size = 2000 # Giảm batch size để ổn định hơn trên gói free
         for i in range(0, len(data), batch_size):
             batch = data[i:i + batch_size]
             execute_values(cur, sql, batch)
@@ -128,7 +135,7 @@ def import_excel_to_db(df):
             yield min(i + batch_size, len(data))
             
     except Exception as e:
-        st.error(f"Lỗi xử lý cơ sở dữ liệu: {e}")
+        st.error(f"Lỗi SQL khi nạp: {e}")
         conn.rollback()
     finally:
         cur.close()
@@ -164,8 +171,8 @@ def main():
                     st.warning("Không tìm thấy dữ liệu phù hợp.")
 
     else: # Quản trị viên
-        st.subheader("📥 Nhập dữ liệu hàng loạt (Hỗ trợ Excel XLSX/XLSB)")
-        uploaded_file = st.file_uploader("Chọn tệp Excel (.xlsx hoặc .xlsb)", type=["xlsx", "xlsb"])
+        st.subheader("📥 Nhập dữ liệu hàng loạt (XLSX/XLSB)")
+        uploaded_file = st.file_uploader("Chọn tệp Excel", type=["xlsx", "xlsb"])
         if uploaded_file:
             try:
                 engine = 'pyxlsb' if uploaded_file.name.endswith('.xlsb') else None
@@ -173,23 +180,23 @@ def main():
                 st.write(f"📊 Phát hiện: **{len(df_preview):,}** bản ghi.")
                 st.dataframe(df_preview.head(5))
                 
-                if st.button("🚀 Bắt đầu nạp dữ liệu vào hệ thống"):
+                if st.button("🚀 Bắt đầu nạp dữ liệu"):
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
                     total = len(df_preview)
-                    success = False
+                    has_data = False
                     for count in import_excel_to_db(df_preview):
                         percent = count / total
                         progress_bar.progress(percent)
-                        status_text.text(f"Đang xử lý: {count:,} / {total:,} hàng...")
-                        success = True # Đánh dấu có ít nhất 1 đợt thành công
+                        status_text.text(f"Đang nạp: {count:,} / {total:,} hàng...")
+                        has_data = True
                     
-                    if success:
+                    if has_data:
                         st.success("✅ Đã hoàn thành nạp dữ liệu thành công!")
                         st.balloons()
             except Exception as e:
-                st.error(f"Lỗi: {e}")
+                st.error(f"Lỗi hệ thống: {e}")
 
 if __name__ == "__main__":
     main()
