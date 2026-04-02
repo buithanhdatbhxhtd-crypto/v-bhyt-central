@@ -7,3 +7,4 @@ pyxlsb
 supabase
 xlsxwriter
 plotly
+pdfplumber
