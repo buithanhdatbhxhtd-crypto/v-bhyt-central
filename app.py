@@ -28,7 +28,7 @@ def init_supabase():
 
 supabase: Client = init_supabase()
 
-# Kết nối Database trực tiếp
+# Kết nối Database trực tiếp (Postgres)
 def get_db_connection():
     try:
         conn = psycopg2.connect(st.secrets["SUPABASE_DB_URL"], connect_timeout=10)
@@ -36,7 +36,48 @@ def get_db_connection():
     except Exception:
         return None
 
-# --- 2. LOGIC XÁC THỰC & QUẢN TRỊ ---
+# --- 2. HÀM TRA CỨU TỐI ƯU HÓA (CACHED) ---
+
+@st.cache_data(ttl=600)
+def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
+    """Hàm thực hiện tra cứu với tốc độ cao bằng SQL trực tiếp và Cache"""
+    conn = get_db_connection()
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
+            where, params = "", {'limit': slimit, 'th': threshold}
+            q_m_clean = q_m.strip()
+            
+            if stype == "Mã BHXH":
+                where = "(ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(lq)s)"
+                params.update({'q': q_m_clean, 'lq': f"{q_m_clean}%"})
+            elif stype == "CCCD":
+                where = "(cccd = %(q)s OR cccd ILIKE %(lq)s)"
+                params.update({'q': q_m_clean, 'lq': f"{q_m_clean}%"})
+            else:
+                name_n = unidecode(q_m_clean).lower()
+                dob_c = q_s.strip().replace("/", "").replace("-", "")
+                where = "(ho_ten_unsigned LIKE %(ln)s OR similarity(ho_ten_unsigned, %(n)s) > %(th)s)"
+                params.update({'n': name_n, 'ln': f"%{name_n}%"})
+                if dob_c:
+                    if len(dob_c) == 4: where += " AND TO_CHAR(ngay_sinh, 'YYYY') = %(d)s"
+                    else: where += " AND (TO_CHAR(ngay_sinh, 'DDMMYYYY') = %(d)s OR TO_CHAR(ngay_sinh, 'YYYYMMDD') = %(d)s)"
+                    params['d'] = dob_c
+
+            if sfilter == "Đã hết hạn": where += " AND han_the < CURRENT_DATE"
+            elif sfilter == "Sắp hết hạn (30 ngày)": where += " AND han_the >= CURRENT_DATE AND han_the <= CURRENT_DATE + INTERVAL '30 days'"
+            elif sfilter == "Còn hạn": where += " AND han_the >= CURRENT_DATE"
+
+            query = f"SELECT {fields} FROM participants WHERE {where} ORDER BY ho_ten ASC LIMIT %(limit)s"
+            cur.execute(query, params)
+            return cur.fetchall()
+    except:
+        return []
+    finally:
+        conn.close()
+
+# --- 3. LOGIC XÁC THỰC & QUẢN TRỊ ---
 
 def login_user(email, password):
     try:
@@ -72,7 +113,7 @@ def admin_manage_user(target_email, action, new_password=None):
         return False, "Hành động không hợp lệ."
     except Exception as e: return False, f"Lỗi: {str(e)}"
 
-# --- 3. HÀM GHI NHẬT KÝ & THỐNG KÊ ---
+# --- 4. HÀM GHI NHẬT KÝ & THỐNG KÊ ---
 
 def log_activity(action, details_dict):
     if not st.session_state.user: return
@@ -105,9 +146,10 @@ def get_advanced_stats():
         return stats
     finally: conn.close()
 
-# --- 4. LOGIC XỬ LÝ DỮ LIỆU PDF ---
+# --- 5. LOGIC XỬ LÝ DỮ LIỆU PDF ---
 
 def parse_bhxh_pdf(pdf_file):
+    """Trích xuất dữ liệu từ file PDF quá trình đóng BHXH (Mẫu 07/SBH) và lọc trùng"""
     history_data, seen_records = [], set()
     msbhxh, summary_text = "", ""
     with pdfplumber.open(pdf_file) as pdf:
@@ -133,12 +175,12 @@ def parse_bhxh_pdf(pdf_file):
                         don_vi = str(row[2]).strip().replace('\n', ' ')
                         muc_raw = str(row[3]).replace('.', '').replace(',', '').strip()
                         muc_dong = float(muc_raw) if muc_raw.isdigit() else 0
-                        ty_ tỷ_le = str(row[6]).strip() if len(row) > 6 and row[6] else ""
+                        ty_le = str(row[6]).strip() if len(row) > 6 and row[6] else ""
                         loai_bh = "BHTN" if "BẢO HIỂM THẤT NGHIỆP" in don_vi.upper() else "BHXH"
                         rec_id = (tu_thang, den_thang, don_vi, muc_dong, loai_bh)
                         if rec_id not in seen_records:
                             seen_records.add(rec_id)
-                            history_data.append((msbhxh, tu_thang, den_thang, don_vi, muc_dong, tỷ_le, loai_bh))
+                            history_data.append((msbhxh, tu_thang, den_thang, don_vi, muc_dong, ty_le, loai_bh))
                     except: continue
     return msbhxh, history_data, summary_text
 
@@ -165,7 +207,6 @@ def import_db_logic(df):
     for col in target:
         if col not in df.columns: df[col] = None
     
-    # Làm sạch dữ liệu
     for col in ['ngay_sinh', 'han_the']:
         df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).apply(lambda x: x.date() if pd.notnull(x) else None)
     for col in ['ma_so_bhxh', 'ho_ten', 'cccd', 'sdt', 'email', 'dia_chi']:
@@ -195,7 +236,7 @@ def import_db_logic(df):
     except Exception as e: conn.rollback(); st.error(f"Lỗi nạp dữ liệu: {e}")
     finally: conn.close()
 
-# --- 5. GIAO DIỆN CHÍNH ---
+# --- 6. GIAO DIỆN CHÍNH ---
 
 if 'user' not in st.session_state: st.session_state.user = None
 if 'threshold' not in st.session_state: st.session_state.threshold = 0.85
@@ -215,7 +256,7 @@ if st.session_state.user is None:
                         log_activity("LOGIN", {"status": "success"}); st.rerun()
     st.stop()
 
-# --- SIDEBAR (LIỆT KÊ TRỰC TIẾP) ---
+# --- SIDEBAR ---
 st.sidebar.title("🛡️ V-BHYT PRO")
 st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
@@ -263,75 +304,50 @@ elif choice == "🔍 Tra cứu & Quá trình":
             q_s = ""
 
     if st.button("🚀 Thực hiện tra cứu", use_container_width=True):
-        conn = get_db_connection()
-        if conn:
-            try:
-                with conn.cursor() as cur:
-                    fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
-                    where, params = "", {'limit': slimit, 'th': st.session_state.threshold}
-                    q_m_clean = q_m.strip()
+        # SỬA LỖI: Gọi hàm Cached để tăng tốc độ
+        rows = perform_search(stype, q_m, q_s, sfilter, slimit, st.session_state.threshold)
+        log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(rows)})
+        
+        if rows:
+            st.success(f"Tìm thấy {len(rows)} kết quả.")
+            for r in rows:
+                with st.container(border=True):
+                    # Làm sạch NaN trước khi hiển thị
+                    def clean(v): return str(v) if v and str(v).lower() not in ['none', 'nan', ''] else ""
                     
-                    if stype == "Mã BHXH":
-                        where = "(ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(lq)s)"
-                        params.update({'q': q_m_clean, 'lq': f"{q_m_clean}%"})
-                    elif stype == "CCCD":
-                        where = "(cccd = %(q)s OR cccd ILIKE %(lq)s)"
-                        params.update({'q': q_m_clean, 'lq': f"{q_m_clean}%"})
-                    else:
-                        name_n = unidecode(q_m_clean).lower()
-                        dob_c = q_s.strip().replace("/", "").replace("-", "")
-                        where = "(ho_ten_unsigned LIKE %(ln)s OR similarity(ho_ten_unsigned, %(n)s) > %(th)s)"
-                        params.update({'n': name_n, 'ln': f"%{name_n}%"})
-                        if dob_c:
-                            if len(dob_c) == 4: where += " AND TO_CHAR(ngay_sinh, 'YYYY') = %(d)s"
-                            else: where += " AND (TO_CHAR(ngay_sinh, 'DDMMYYYY') = %(d)s OR TO_CHAR(ngay_sinh, 'YYYYMMDD') = %(d)s)"
-                            params['d'] = dob_c
+                    c1, c2, c3, c4 = st.columns([3.5, 3, 3.5, 2.5])
+                    ms = clean(r[0]); name = clean(r[2])
+                    dob = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
+                    cccd_raw = clean(r[4])
+                    cccd_d = f"{cccd_raw[:3]}***{cccd_raw[-3:]}" if len(cccd_raw) >= 6 else cccd_raw
+                    addr = clean(r[5]) if clean(r[5]) else "Chưa rõ địa chỉ"
+                    sdt = clean(r[6])
+                    han = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else "N/A"
 
-                    if sfilter == "Đã hết hạn": where += " AND han_the < CURRENT_DATE"
-                    elif sfilter == "Sắp hết hạn (30 ngày)": where += " AND han_the >= CURRENT_DATE AND han_the <= CURRENT_DATE + INTERVAL '30 days'"
-                    elif sfilter == "Còn hạn": where += " AND han_the >= CURRENT_DATE"
-
-                    cur.execute(f"SELECT {fields} FROM participants WHERE {where} ORDER BY ho_ten ASC LIMIT %(limit)s", params)
-                    rows = cur.fetchall()
-                    log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(rows)})
-                    
-                    if rows:
-                        st.success(f"Tìm thấy {len(rows)} kết quả.")
-                        for r in rows:
-                            with st.container(border=True):
-                                # Dùng Container Native của Streamlit để đảm bảo hiển thị đủ chân chữ và nhanh
-                                c1, c2, c3, c4 = st.columns([3.5, 3, 3.5, 2.5])
-                                ms = str(r[0]); name = str(r[2])
-                                dob = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
-                                cccd = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else "N/A"
-                                cccd_d = f"{cccd[:3]}***{cccd[-3:]}" if cccd != "N/A" and len(cccd) >= 6 else cccd
-                                addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else "Chưa rõ địa chỉ"
-                                sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan', ''] else "N/A"
-                                han = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else "N/A"
-
-                                with c1:
-                                    st.markdown(f"**{name}**")
-                                    st.caption(f"🆔 {ms}")
-                                    st.caption(f"🎂 {dob} | 🪪 {cccd_d}")
-                                with c2:
-                                    st.caption(f"📍 {addr}")
-                                    st.markdown(f"📞 `{sdt}`")
-                                with c3:
-                                    if r[9]: st.success(f"📈 {r[9]}")
-                                    else: st.info("💡 Chưa có quá trình")
-                                    st.caption(f"🏥 Hạn BHYT: {han}")
-                                with c4:
-                                    with st.expander("📜 Chi tiết", expanded=False):
-                                        # Truy vấn chi tiết khi người dùng bấm mở
-                                        cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (ms,))
-                                        h_rows = cur.fetchall()
-                                        if h_rows:
-                                            df_h = pd.DataFrame(h_rows, columns=["Từ", "Đến", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"])
-                                            st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}), use_container_width=True, hide_index=True)
-                                        else: st.warning("Trống")
-                    else: st.warning("Không tìm thấy dữ liệu.")
-            except Exception as e: st.error(f"Lỗi truy vấn: {e}")
-            finally: conn.close()
+                    with c1:
+                        st.markdown(f"**{name}**")
+                        st.caption(f"🆔 {ms}")
+                        st.caption(f"🎂 {dob} | 🪪 {cccd_d}")
+                    with c2:
+                        st.caption(f"📍 {addr}")
+                        if sdt: st.markdown(f"📞 `{sdt}`")
+                    with c3:
+                        if r[9]: st.success(f"📈 {r[9]}")
+                        else: st.info("💡 Chưa có quá trình")
+                        st.caption(f"🏥 Hạn BHYT: {han}")
+                    with c4:
+                        with st.expander("📜 Chi tiết", expanded=False):
+                            conn = get_db_connection()
+                            if conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (ms,))
+                                    h_rows = cur.fetchall()
+                                    if h_rows:
+                                        df_h = pd.DataFrame(h_rows, columns=["Từ", "Đến", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"])
+                                        st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}), use_container_width=True, hide_index=True)
+                                    else: st.warning("Trống")
+                                conn.close()
+        else: st.warning("Không tìm thấy dữ liệu.")
 
 elif choice == "🧮 Tiện ích tính toán":
     st.header("🧮 Công cụ hỗ trợ thu BHYT & BHXH")
