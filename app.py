@@ -39,31 +39,34 @@ def get_db_connection():
 
 # --- 2. HÀM TIỆN ÍCH HIỂN THỊ KÈM COPY INLINE ---
 def st_copy_inline(label, text, is_bold=False, color="#31333F", display_text=None):
-    """Hiển thị nhãn + nội dung + nút copy trên cùng 1 dòng. 
-    Hỗ trợ hiển thị một kiểu (display_text) và copy một kiểu (text)."""
+    """Hiển thị nhãn + nội dung + nút copy trên cùng 1 dòng, cực kỳ nhỏ gọn"""
     if not text or str(text).lower() in ['none', 'nan', '']:
-        text = "N/A"
-    
-    # Nếu không truyền display_text, mặc định hiển thị text gốc
-    d_text = display_text if display_text else text
+        text_to_show = "N/A"
+        has_data = False
+    else:
+        text_to_show = display_text if display_text else text
+        has_data = True
     
     weight = "bold" if is_bold else "normal"
+    button_style = "display: flex;" if has_data else "display: none;"
+    
     html = f"""
-    <div style="display: flex; align-items: center; font-family: sans-serif; font-size: 13px; margin-bottom: 2px;">
-        <span style="color: {color}; font-weight: {weight}; white-space: nowrap;">{label} {d_text}</span>
+    <div style="display: flex; align-items: center; font-family: sans-serif; font-size: 13px; margin-right: 15px; height: 24px;">
+        <span style="color: {color}; font-weight: {weight}; white-space: nowrap;">{label} {text_to_show}</span>
         <button onclick="copyToClipboard('{text}')" style="
-            margin-left: 6px;
-            padding: 0px 4px;
-            font-size: 10px;
+            {button_style}
+            margin-left: 4px;
+            padding: 0px 3px;
+            font-size: 9px;
             cursor: pointer;
             border-radius: 3px;
-            border: 1px solid #dcdcdc;
+            border: 1px solid #e0e0e0;
             background: #ffffff;
             color: #1E88E5;
-            height: 18px;
-            line-height: 16px;
-            display: {'none' if text == 'N/A' else 'flex'};
+            height: 16px;
+            line-height: 14px;
             align-items: center;
+            justify-content: center;
         " title="Sao chép">📋</button>
     </div>
     <script>
@@ -77,7 +80,7 @@ def st_copy_inline(label, text, is_bold=False, color="#31333F", display_text=Non
     }}
     </script>
     """
-    components.html(html, height=22)
+    components.html(html, height=24)
 
 # --- 3. LOGIC XÁC THỰC & QUẢN TRỊ ---
 
@@ -101,23 +104,18 @@ def is_admin():
     return st.session_state.user.email in admin_emails
 
 def admin_manage_user(target_email, action, new_password=None):
-    """Sử dụng Service Role để quản lý tài khoản nhân viên"""
     try:
         admin_client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
         response = admin_client.auth.admin.list_users()
         all_users = response.users if hasattr(response, 'users') else response
         user = next((u for u in all_users if u.email == target_email), None)
-        
-        if not user:
-            return False, "Không tìm thấy người dùng."
-
+        if not user: return False, "Không tìm thấy người dùng."
         if action == "RESET_PWD":
             admin_client.auth.admin.update_user_by_id(user.id, {"password": new_password})
             return True, f"Đã đổi mật khẩu cho {target_email}."
         elif action == "DELETE":
             admin_client.auth.admin.delete_user(user.id)
             return True, f"Đã xóa tài khoản {target_email}."
-        
         return False, "Hành động không hợp lệ."
     except Exception as e:
         return False, f"Lỗi: {str(e)}"
@@ -125,7 +123,6 @@ def admin_manage_user(target_email, action, new_password=None):
 # --- 4. HÀM GHI NHẬT KÝ & THỐNG KÊ ---
 
 def log_activity(action, details_dict):
-    """Ghi nhận mọi thao tác vào bảng audit_logs"""
     if not st.session_state.user: return
     conn = get_db_connection()
     if conn:
@@ -142,7 +139,6 @@ def log_activity(action, details_dict):
         finally: conn.close()
 
 def get_advanced_stats():
-    """Lấy dữ liệu cho Dashboard"""
     conn = get_db_connection()
     if not conn: return None
     stats = {}
@@ -164,29 +160,19 @@ def get_advanced_stats():
 # --- 5. LOGIC XỬ LÝ DỮ LIỆU PDF ---
 
 def parse_bhxh_pdf(pdf_file):
-    """Trích xuất dữ liệu từ file PDF quá trình đóng BHXH (Mẫu 07/SBH) và lọc trùng"""
-    history_data = []
-    seen_records = set() 
-    msbhxh = ""
-    summary_text = ""
-    
+    history_data, seen_records = [], set()
+    msbhxh, summary_text = "", ""
     with pdfplumber.open(pdf_file) as pdf:
         full_text = ""
-        for page in pdf.pages:
-            full_text += page.extract_text() + "\n"
-        
+        for page in pdf.pages: full_text += page.extract_text() + "\n"
         match_ms = re.search(r"Mã số BHXH\s*:\s*(\d+)", full_text)
-        if match_ms:
-            msbhxh = match_ms.group(1).strip()
-            
-        match_bhxh = re.search(r"Thời gian đóng BHXH vào quỹ hưu trí.*?là\s*(.*?)(?:\n|$)", full_text)
-        match_bhtn = re.search(r"Thời gian đóng BHTN vào quỹ BHTN.*?là\s*(.*?)(?:\n|$)", full_text)
-        
+        if match_ms: msbhxh = match_ms.group(1).strip()
+        m_bhxh = re.search(r"Thời gian đóng BHXH vào quỹ hưu trí.*?là\s*(.*?)(?:\n|$)", full_text)
+        m_bhtn = re.search(r"Thời gian đóng BHTN vào quỹ BHTN.*?là\s*(.*?)(?:\n|$)", full_text)
         sums = []
-        if match_bhxh: sums.append(f"BHXH: {match_bhxh.group(1).strip()}")
-        if match_bhtn: sums.append(f"BHTN: {match_bhtn.group(1).strip()}")
+        if m_bhxh: sums.append(f"BHXH: {m_bhxh.group(1).strip()}")
+        if m_bhtn: sums.append(f"BHTN: {m_bhtn.group(1).strip()}")
         summary_text = " | ".join(sums)
-            
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
@@ -194,7 +180,6 @@ def parse_bhxh_pdf(pdf_file):
                     if not row or len(row) < 5 or not row[0]: continue
                     tu_thang = str(row[0]).strip()
                     if not re.match(r"\d{2}/\d{4}", tu_thang): continue
-                    
                     try:
                         den_thang = str(row[1]).strip() if row[1] else ""
                         don_vi = str(row[2]).strip().replace('\n', ' ')
@@ -202,13 +187,11 @@ def parse_bhxh_pdf(pdf_file):
                         muc_dong = float(muc_raw) if muc_raw.isdigit() else 0
                         ty_le = str(row[6]).strip() if len(row) > 6 and row[6] else ""
                         loai_bh = "BHTN" if "BẢO HIỂM THẤT NGHIỆP" in don_vi.upper() else "BHXH"
-                        
-                        record_id = (tu_thang, den_thang, don_vi, muc_dong, loai_bh)
-                        if record_id not in seen_records:
-                            seen_records.add(record_id)
+                        rec_id = (tu_thang, den_thang, don_vi, muc_dong, loai_bh)
+                        if rec_id not in seen_records:
+                            seen_records.add(rec_id)
                             history_data.append((msbhxh, tu_thang, den_thang, don_vi, muc_dong, ty_le, loai_bh))
                     except: continue
-                    
     return msbhxh, history_data, summary_text
 
 def save_bhxh_history(msbhxh, data, summary):
@@ -218,18 +201,14 @@ def save_bhxh_history(msbhxh, data, summary):
     try:
         cur = conn.cursor()
         cur.execute("DELETE FROM bhxh_history WHERE ma_so_bhxh = %s", (msbhxh,))
-        sql_hist = "INSERT INTO bhxh_history (ma_so_bhxh, tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh) VALUES %s"
-        execute_values(cur, sql_hist, data)
-        if summary:
-            cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = %s WHERE ma_so_bhxh = %s", (summary, msbhxh))
-        conn.commit()
-        return True
-    except Exception:
-        return False
+        execute_values(cur, "INSERT INTO bhxh_history (ma_so_bhxh, tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh) VALUES %s", data)
+        if summary: cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = %s WHERE ma_so_bhxh = %s", (summary, msbhxh))
+        conn.commit(); return True
+    except: return False
     finally: conn.close()
 
 def import_db_logic(df):
-    """Nạp dữ liệu từ Excel (.xlsb, .xlsx)"""
+    """Nạp dữ liệu an toàn, tự động loại bỏ trùng lặp trong nội bộ file và DB"""
     df.columns = [str(c).strip().lower() for c in df.columns]
     mapping = {'ma so bhxh': 'ma_so_bhxh', 'mã số bhxh': 'ma_so_bhxh', 'ho ten': 'ho_ten', 'ngay sinh': 'ngay_sinh',
                'cccd': 'cccd', 'sdt': 'sdt', 'diachilh': 'dia_chi', 'hantheden': 'han_the', 'email': 'email'}
@@ -237,14 +216,25 @@ def import_db_logic(df):
     target = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'dia_chi', 'sdt', 'email', 'han_the']
     for col in target:
         if col not in df.columns: df[col] = None
+    
+    # Làm sạch dữ liệu và xử lý giá trị trống
     for col in ['ngay_sinh', 'han_the']:
         df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).apply(lambda x: x.date() if pd.notnull(x) else None)
-    for col in ['ma_so_bhxh', 'ho_ten', 'cccd', 'sdt', 'email']:
+    for col in ['ma_so_bhxh', 'ho_ten', 'cccd', 'sdt', 'email', 'dia_chi']:
         df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df[col] = df[col].where(~df[col].isin(['nan', 'None', 'NAT', 'NaT', '']), None)
+    
+    # 💡 FIX LỖI: Loại bỏ trùng lặp ngay trong DataFrame trước khi đẩy lên SQL
+    df = df.drop_duplicates(subset=['ma_so_bhxh'], keep='first')
+    # Chỉ lọc trùng CCCD nếu CCCD không phải NULL
+    cccd_valid = df[df['cccd'].notnull()]
+    cccd_invalid = df[df['cccd'].isnull()]
+    cccd_valid = cccd_valid.drop_duplicates(subset=['cccd'], keep='first')
+    df = pd.concat([cccd_valid, cccd_invalid])
+
     data = list(df[target].itertuples(index=False, name=None))
     
-    # --- THAY ĐỔI LOGIC: SỬ DỤNG DO NOTHING ĐỂ BỎ QUA NGƯỜI TRÙNG ---
+    # 💡 FIX LỖI UNIQUE VIOLATION: Sử dụng DO NOTHING để bỏ qua dòng trùng lặp
     sql = """
         INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
         VALUES %s 
@@ -307,18 +297,10 @@ if choice == "📊 Dashboard":
         c2.metric("Đã hết hạn BHYT", f"{stats['expired']:,}", delta_color="inverse")
         c3.metric("Sắp hết hạn", f"{stats['expiring']:,}")
         c4.metric("Lượt tải dữ liệu", f"{stats.get('total_exports', 0):,}", delta="An ninh", delta_color="off")
-        
         st.write("---")
-        col_chart1, col_chart2 = st.columns(2)
-        with col_chart1:
-            st.subheader("📍 Tỷ lệ trạng thái thẻ BHYT")
-            df_pie = pd.DataFrame({"Trạng thái": ["Còn hạn", "Hết hạn", "Sắp hết hạn"],
-                                   "Số lượng": [stats['total']-stats['expired']-stats['expiring'], stats['expired'], stats['expiring']]})
-            st.plotly_chart(px.pie(df_pie, values='Số lượng', names='Trạng thái', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
-        with col_chart2:
-            st.subheader("🛠️ Chất lượng dữ liệu (PII)")
-            df_q = pd.DataFrame({"Loại": ["Đầy đủ", "Thiếu CCCD/SĐT"], "Số lượng": [stats['total']-stats['incomplete'], stats['incomplete']]})
-            st.plotly_chart(px.bar(df_q, x="Loại", y="Số lượng", color="Loại", color_discrete_sequence=["#2ecc71", "#e74c3c"]), use_container_width=True)
+        col1, col2 = st.columns(2)
+        with col1: st.plotly_chart(px.pie(pd.DataFrame({"Trạng thái": ["Còn hạn", "Hết hạn", "Sắp hạn"], "Số lượng": [stats['total']-stats['expired']-stats['expiring'], stats['expired'], stats['expiring']]}), values='Số lượng', names='Trạng thái', hole=0.4, title="📍 Tỷ lệ trạng thái thẻ BHYT"), use_container_width=True)
+        with col2: st.plotly_chart(px.bar(pd.DataFrame({"Loại": ["Đầy đủ", "Thiếu PII"], "Số lượng": [stats['total']-stats['incomplete'], stats['incomplete']]}), x="Loại", y="Số lượng", color="Loại", title="🛠️ Chất lượng dữ liệu"), use_container_width=True)
 
 elif choice == "🔍 Tra cứu & Quá trình":
     st.header("🔍 Tra cứu người tham gia & Lịch sử BHXH")
@@ -369,61 +351,45 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 st.success(f"Tìm thấy {len(rows)} kết quả.")
                 for r in rows:
                     with st.container(border=True):
-                        c1, c2, c3, c4 = st.columns([3.5, 2.5, 3.5, 2.5])
+                        # --- GIAO DIỆN THEO DÒNG TỐI ƯU ---
+                        c1, c2, c3, c4 = st.columns([3.5, 3.5, 3.5, 2.5])
                         
-                        full_name = str(r[2])
                         msbhxh = str(r[0])
                         dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
-                        
-                        # --- XỬ LÝ CCCD: Hiển thị 3 đầu 3 cuối, sao chép toàn bộ ---
                         cccd_raw = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else 'N/A'
-                        cccd_display = cccd_raw
-                        if cccd_raw != 'N/A' and len(cccd_raw) >= 6:
-                            cccd_display = f"{cccd_raw[:3]}***{cccd_raw[-3:]}"
+                        cccd_display = f"{cccd_raw[:3]}***{cccd_raw[-3:]}" if cccd_raw != 'N/A' and len(cccd_raw) >= 6 else cccd_raw
                         
-                        # Cột 1: Danh tính quan trọng
+                        # Cột 1: Danh tính
                         with c1:
-                            st_copy_inline("", full_name, is_bold=True)
+                            st_copy_inline("", str(r[2]), is_bold=True)
                             st_copy_inline("🆔", msbhxh)
                             st_copy_inline("🎂", dob_str)
                             st_copy_inline("🪪", cccd_raw, display_text=cccd_display)
                         
                         # Cột 2: Địa chỉ & Liên hệ
                         with c2:
-                            r_addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else 'Chưa có địa chỉ'
+                            r_addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else 'Chưa rõ địa chỉ'
                             r_sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan', ''] else 'Chưa có SĐT'
                             st.caption(f"📍 {r_addr}")
-                            st.markdown(f"📞 `{r_sdt}`")
+                            st_copy_inline("📞", r_sdt)
                         
                         # Cột 3: Quá trình & Trạng thái BHYT
                         with c3:
-                            if r[9]:
-                                st.success(f"📈 {r[9]}")
-                            else:
-                                st.info("💡 Chưa nạp PDF quá trình")
+                            if r[9]: st.success(f"📈 {r[9]}")
+                            else: st.info("💡 Chưa nạp PDF quá trình")
                             expiry_str = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'
                             st.caption(f"🏥 Hạn BHYT: {expiry_str}")
 
                         # Cột 4: Nút tra cứu chi tiết
                         with c4:
                             with st.expander("📜 Tra cứu BHXH", expanded=False):
-                                cur.execute("""
-                                    SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh 
-                                    FROM bhxh_history 
-                                    WHERE ma_so_bhxh = %s 
-                                    ORDER BY to_date(tu_thang, 'MM/YYYY') ASC
-                                """, (msbhxh.strip(),))
+                                cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (msbhxh.strip(),))
                                 h_rows = cur.fetchall()
                                 if h_rows:
                                     df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
-                                    def style_row(row):
-                                        color = 'color: #1a73e8; font-weight: bold;' if row['Loại'] == 'BHXH' else 'color: #5f6368;'
-                                        return [color] * len(row)
-                                    st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}).apply(style_row, axis=1), 
-                                                 use_container_width=True, hide_index=True)
-                                    log_activity("VIEW_HISTORY", {"msbhxh": msbhxh})
-                                else:
-                                    st.warning("Vui lòng nạp PDF Mẫu 07/SBH.")
+                                    def style_row(row): return ['color: #1a73e8; font-weight: bold;' if row['Loại'] == 'BHXH' else 'color: #5f6368;'] * len(row)
+                                    st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}).apply(style_row, axis=1), use_container_width=True, hide_index=True)
+                                else: st.warning("Vui lòng nạp PDF Mẫu 07/SBH.")
             else: st.warning("Không tìm thấy dữ liệu.")
         finally: conn.close()
 
@@ -464,93 +430,55 @@ elif choice == "📥 Nhập dữ liệu":
                     pb.progress(count/len(df)); txt.text(f"Đã nạp {count:,} hàng...")
                 st.success("Cập nhật thành công!"); log_activity("IMPORT_EXCEL", {"rows": len(df)})
     with tp:
-        st.info("💡 Hệ thống sẽ tự động bóc tách Mã số BHXH và toàn bộ lịch sử đóng từ Mẫu 07/SBH.")
         pdf_f = st.file_uploader("Chọn file PDF (Mẫu 07/SBH)", type=["pdf"])
         if pdf_f and st.button("🔍 Phân tích và Lưu quá trình"):
             with st.spinner("Đang đọc PDF..."):
                 ms, data, summary = parse_bhxh_pdf(pdf_f)
                 if ms and data:
                     if save_bhxh_history(ms, data, summary):
-                        st.success(f"✅ Đã cập nhật thành công giai đoạn đóng và tổng quát cho Mã số: {ms}")
+                        st.success(f"✅ Đã nạp thành công Mã số: {ms}")
                         log_activity("IMPORT_PDF", {"ms": ms, "rows": len(data)})
-                    else: st.error("Lỗi khi lưu vào cơ sở dữ liệu.")
-                else: st.error("Không tìm thấy dữ liệu hợp lệ trong file PDF này.")
+                    else: st.error("Lỗi khi lưu Database.")
+                else: st.error("Không tìm thấy dữ liệu hợp lệ.")
 
 elif choice == "📜 Nhật ký hệ thống":
     st.header("📜 Nhật ký hoạt động")
-    col_f1, col_f2 = st.columns([2, 1])
-    with col_f1: search_q = st.text_input("🔍 Tìm theo Email, Hành động")
-    with col_f2: dr = st.date_input("Khoảng ngày", value=[date.today()-timedelta(days=7), date.today()])
+    col1, col2 = st.columns([2, 1])
+    with col1: search_q = st.text_input("🔍 Tìm nhanh")
+    with col2: dr = st.date_input("Khoảng ngày", value=[date.today()-timedelta(days=7), date.today()])
     conn = get_db_connection()
     if conn:
         df_l = pd.read_sql("SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 2000", conn)
         if not df_l.empty:
             df_l['created_at'] = pd.to_datetime(df_l['created_at']).dt.tz_convert('Asia/Ho_Chi_Minh')
-            if len(dr) == 2:
-                df_l = df_l[(df_l['created_at'].dt.date >= dr[0]) & (df_l['created_at'].dt.date <= dr[1])]
-            if search_q:
-                mask = df_l.astype(str).apply(lambda row: row.str.contains(search_q, case=False).any(), axis=1)
-                df_l = df_l[mask]
+            if len(dr) == 2: df_l = df_l[(df_l['created_at'].dt.date >= dr[0]) & (df_l['created_at'].dt.date <= dr[1])]
+            if search_q: df_l = df_l[df_l.astype(str).apply(lambda row: row.str.contains(search_q, case=False).any(), axis=1)]
             df_l['created_at'] = df_l['created_at'].dt.strftime('%H:%M:%S %d/%m/%Y')
-            df_l['details'] = df_l['details'].apply(lambda x: json.dumps(x, ensure_ascii=False) if x else "")
             st.dataframe(df_l, use_container_width=True, hide_index=True)
         conn.close()
 
-elif choice == "👥 Quản lý nhân sự":
-    st.header("👥 Quản lý nhân sự")
-    target = st.text_input("Email nhân viên")
-    act = st.selectbox("Hành động", ["Đặt lại mật khẩu", "Xóa tài khoản"])
-    if st.button("🚀 Thực thi"):
-        if act == "Đặt lại mật khẩu":
-            pwd = st.text_input("Mật khẩu mới", type="password", key="np")
-            if pwd: s, m = admin_manage_user(target, "RESET_PWD", pwd)
-            st.info(m if 'm' in locals() else "Vui lòng nhập mật khẩu.")
-        else:
-            s, m = admin_manage_user(target, "DELETE"); st.info(m)
-
-elif choice == "🔧 Cấu hình":
-    st.header("🔧 Cấu hình")
-    st.session_state.threshold = st.slider("Độ nhạy tìm kiếm tên", 0.5, 0.95, st.session_state.threshold)
-    if st.button("Lưu"): st.success("Đã lưu cấu hình!")
-
 elif choice == "🗑️ Dọn dẹp":
     st.header("🗑️ Quản lý & Dọn dẹp kho dữ liệu")
-    
-    # MỤC 1: XÓA DỮ LIỆU BHYT
     with st.expander("📊 Dọn dẹp dữ liệu BHYT (Excel)", expanded=True):
-        if st.checkbox("Tôi xác nhận muốn xóa sạch dữ liệu BHYT", key="chk_del_bhyt"):
-            if st.button("🔴 THỰC HIỆN XÓA DỮ LIỆU BHYT", key="btn_del_bhyt"):
+        if st.checkbox("Tôi xác nhận xóa BHYT", key="del_bhyt"):
+            if st.button("🔴 XÓA BHYT"):
                 conn = get_db_connection()
-                if conn:
-                    with conn.cursor() as cur:
-                        cur.execute("TRUNCATE TABLE participants RESTART IDENTITY")
-                    conn.commit(); conn.close()
-                    log_activity("DELETE_ALL_BHYT", {"status": "success"})
-                    st.success("Đã dọn sạch dữ liệu BHYT!"); time.sleep(1); st.rerun()
-
-    # MỤC 2: XÓA DỮ LIỆU BHXH
+                with conn.cursor() as cur: cur.execute("TRUNCATE TABLE participants RESTART IDENTITY")
+                conn.commit(); st.success("Xong!"); time.sleep(1); st.rerun()
     with st.expander("📜 Dọn dẹp dữ liệu BHXH (PDF)", expanded=True):
-        if st.checkbox("Tôi xác nhận muốn xóa sạch lịch sử BHXH", key="chk_del_bhxh"):
-            if st.button("🔴 THỰC HIỆN XÓA LỊCH SỬ BHXH", key="btn_del_bhxh"):
+        if st.checkbox("Tôi xác nhận xóa lịch sử BHXH", key="del_bhxh"):
+            if st.button("🔴 XÓA LỊCH SỬ"):
                 conn = get_db_connection()
-                if conn:
-                    with conn.cursor() as cur:
-                        cur.execute("TRUNCATE TABLE bhxh_history RESTART IDENTITY")
-                        cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = NULL")
-                    conn.commit(); conn.close()
-                    log_activity("DELETE_ALL_BHXH", {"status": "success"})
-                    st.success("Đã dọn sạch dữ liệu BHXH!"); time.sleep(1); st.rerun()
-
-    # MỤC 3: XÓA NHẬT KÝ HOẠT ĐỘNG
-    with st.expander("📜 Dọn dẹp Nhật ký hệ thống", expanded=True):
-        if st.checkbox("Tôi xác nhận muốn xóa sạch nhật ký", key="chk_del_logs"):
-            if st.button("🔴 THỰC HIỆN XÓA NHẬT KÝ", key="btn_del_logs"):
+                with conn.cursor() as cur: 
+                    cur.execute("TRUNCATE TABLE bhxh_history RESTART IDENTITY")
+                    cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = NULL")
+                conn.commit(); st.success("Xong!"); time.sleep(1); st.rerun()
+    with st.expander("📜 Dọn dẹp Nhật ký", expanded=True):
+        if st.checkbox("Tôi xác nhận xóa nhật ký", key="del_logs"):
+            if st.button("🔴 XÓA NHẬT KÝ"):
                 conn = get_db_connection()
-                if conn:
-                    with conn.cursor() as cur:
-                        cur.execute("TRUNCATE TABLE audit_logs RESTART IDENTITY")
-                    conn.commit(); conn.close()
-                    st.success("Đã dọn sạch nhật ký hoạt động!"); time.sleep(1); st.rerun()
+                with conn.cursor() as cur: cur.execute("TRUNCATE TABLE audit_logs RESTART IDENTITY")
+                conn.commit(); st.success("Xong!"); time.sleep(1); st.rerun()
 
 elif choice == "⚙️ Tài khoản":
     st.header("⚙️ Tài khoản")
