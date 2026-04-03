@@ -238,7 +238,7 @@ def import_db_logic(df):
     
     try:
         cur = conn.cursor()
-        # 3. Tạo bảng tạm (Temporary Table) để chứa dữ liệu mới nạp
+        # 3. Tạo bảng tạm
         cur.execute("""
             CREATE TEMP TABLE temp_import (
                 ma_so_bhxh VARCHAR(15), ma_the_bhyt VARCHAR(15), ho_ten TEXT, 
@@ -250,8 +250,7 @@ def import_db_logic(df):
         # 4. Đẩy dữ liệu vào bảng tạm
         execute_values(cur, "INSERT INTO temp_import VALUES %s", data)
         
-        # 5. Lệnh nạp chính: Chỉ chèn những người có mã BHXH và CCCD chưa từng tồn tại trong hệ thống
-        # Dùng NOT EXISTS để kiểm tra cả hai cột Unique mà không gây lỗi UniqueViolation
+        # 5. Lệnh nạp chính (Bỏ qua nếu trùng BHXH hoặc CCCD)
         sql_insert = """
             INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
             SELECT t.ma_so_bhxh, t.ma_the_bhyt, t.ho_ten, t.ngay_sinh, t.cccd, t.dia_chi, t.sdt, t.email, t.han_the
@@ -292,18 +291,22 @@ if st.session_state.user is None:
                         st.rerun()
     st.stop()
 
-# --- SIDEBAR ---
+# --- SIDEBAR (CẬP NHẬT GIAO DIỆN LIỆT KÊ TRỰC TIẾP) ---
 st.sidebar.title("🛡️ V-BHYT PRO")
 st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
 st.sidebar.caption(role_label)
 
-menu = ["📊 Dashboard", "🔍 Tra cứu & Quá trình", "🧮 Tiện ích tính toán", "⚙️ Tài khoản"]
+# Danh sách menu tùy biến theo quyền hạn
+menu_options = ["📊 Dashboard", "🔍 Tra cứu & Quá trình", "🧮 Tiện ích tính toán", "⚙️ Tài khoản"]
 if is_admin():
-    menu += ["📥 Nhập dữ liệu", "📜 Nhật ký hệ thống", "👥 Quản lý nhân sự", "🔧 Cấu hình", "🗑️ Dọn dẹp"]
+    menu_options += ["📥 Nhập dữ liệu", "📜 Nhật ký hệ thống", "👥 Quản lý nhân sự", "🔧 Cấu hình", "🗑️ Dọn dẹp"]
 
-choice = st.sidebar.selectbox("Menu Quản lý", menu)
-if st.sidebar.button("🚪 Đăng xuất", use_container_width=True):
+# Sử dụng radio để liệt kê trực tiếp ra sidebar
+choice = st.sidebar.radio("Danh mục quản lý", menu_options, label_visibility="collapsed")
+
+st.sidebar.markdown("---")
+if st.sidebar.button("🚪 Đăng xuất hệ thống", use_container_width=True):
     log_activity("LOGOUT", {"status": "success"}); logout_user()
 
 # --- NỘI DUNG TỪNG TAB ---
@@ -372,7 +375,6 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 for r in rows:
                     with st.container(border=True):
                         c1, c2, c3, c4 = st.columns([3.5, 3.5, 3.5, 2.5])
-                        
                         msbhxh = str(r[0])
                         dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
                         cccd_raw = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else 'N/A'
@@ -383,19 +385,16 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             st_copy_inline("🆔", msbhxh)
                             st_copy_inline("🎂", dob_str)
                             st_copy_inline("🪪", cccd_raw, display_text=cccd_display)
-                        
                         with c2:
                             r_addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else 'Chưa rõ địa chỉ'
                             r_sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan', ''] else 'Chưa có SĐT'
                             st.caption(f"📍 {r_addr}")
                             st_copy_inline("📞", r_sdt)
-                        
                         with c3:
                             if r[9]: st.success(f"📈 {r[9]}")
                             else: st.info("💡 Chưa nạp PDF quá trình")
                             expiry_str = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'
                             st.caption(f"🏥 Hạn BHYT: {expiry_str}")
-
                         with c4:
                             with st.expander("📜 Tra cứu BHXH", expanded=False):
                                 cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (msbhxh.strip(),))
