@@ -201,7 +201,6 @@ def import_db_logic(df):
     """Nạp dữ liệu ổn định với Mapping tiêu đề chuẩn theo file của bạn"""
     df.columns = [str(c).strip().lower() for c in df.columns]
     
-    # Mapping đồng bộ hoàn toàn với file Excel của người dùng
     mapping = {
         'ma so bhxh': 'ma_so_bhxh', 
         'mã số bhxh': 'ma_so_bhxh',
@@ -224,7 +223,6 @@ def import_db_logic(df):
     for col in target:
         if col not in df.columns: df[col] = None
     
-    # Chuẩn hóa dữ liệu
     for col in ['ngay_sinh', 'han_the']:
         df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).apply(lambda x: x.date() if pd.notnull(x) else None)
     
@@ -242,7 +240,6 @@ def import_db_logic(df):
     
     try:
         cur = conn.cursor()
-        # Quay lại logic nạp dữ liệu ổn định cũ (Upsert)
         sql = """
             INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
             VALUES %s ON CONFLICT (ma_so_bhxh) DO UPDATE SET
@@ -265,6 +262,7 @@ def import_db_logic(df):
 
 if 'user' not in st.session_state: st.session_state.user = None
 if 'threshold' not in st.session_state: st.session_state.threshold = 0.85
+if 'search_results' not in st.session_state: st.session_state.search_results = None
 
 if st.session_state.user is None:
     st.markdown("<h1 style='text-align: center; color: #1E88E5;'>🏥 V-BHYT Central Pro</h1>", unsafe_allow_html=True)
@@ -295,7 +293,7 @@ choice = st.sidebar.radio("Danh mục quản lý", menu_options, label_visibilit
 
 st.sidebar.markdown("---")
 if st.sidebar.button("🚪 Đăng xuất", use_container_width=True):
-    st.cache_data.clear(); log_activity("LOGOUT", {"status": "success"}); logout_user()
+    st.cache_data.clear(); st.session_state.clear(); logout_user()
 
 # --- NỘI DUNG ---
 
@@ -329,50 +327,55 @@ elif choice == "🔍 Tra cứu & Quá trình":
             q_s = ""
 
     if st.button("🚀 Thực hiện tra cứu", use_container_width=True):
-        rows = perform_search(stype, q_m, q_s, sfilter, slimit, st.session_state.threshold)
-        log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(rows)})
-        
-        if rows:
-            # Hiển thị dạng bảng tối ưu
-            df_display = pd.DataFrame(rows, columns=[
-                "Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", 
-                "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"
-            ])
-            
-            # Làm sạch dữ liệu hiển thị (Xử lý NaN)
-            def clean_fmt(x):
-                if pd.isna(x) or str(x).lower() in ['none', 'nan', 'nat', '']: return ""
-                return str(x)
-            for col in df_display.columns:
-                df_display[col] = df_display[col].apply(clean_fmt)
-            
-            # Bảo mật CCCD
-            df_display["CCCD"] = df_display["CCCD"].apply(lambda x: f"{x[:3]}***{x[-3:]}" if len(x) >= 6 else x)
-            # Định dạng ngày
-            for d_col in ["Ngày sinh", "Hạn thẻ"]:
-                df_display[d_col] = pd.to_datetime(df_display[d_col], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
+        st.session_state.search_results = perform_search(stype, q_m, q_s, sfilter, slimit, st.session_state.threshold)
+        log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(st.session_state.search_results)})
 
-            st.success(f"Tìm thấy {len(rows)} kết quả.")
-            st.dataframe(df_display, use_container_width=True, hide_index=True)
-            
-            # Xem chi tiết
-            st.write("---")
-            st.subheader("📜 Xem quá trình BHXH chi tiết")
-            options = [f"{r[2]} ({r[0]})" for r in rows]
-            sel = st.selectbox("Chọn người tham gia:", options=["-- Mời chọn --"] + options)
-            if sel != "-- Mời chọn --":
-                ms_sel = re.search(r"\((.*?)\)", sel).group(1)
-                conn = get_db_connection()
-                if conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (ms_sel,))
-                        h_rows = cur.fetchall()
-                        if h_rows:
-                            df_hist = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"])
-                            st.table(df_hist.style.format({"Mức đóng": "{:,.0f}đ"}))
-                        else: st.warning("Chưa có lịch sử chi tiết.")
-                    conn.close()
-        else: st.warning("Không tìm thấy dữ liệu.")
+    # --- HIỂN THỊ KẾT QUẢ TỪ SESSION STATE ---
+    if st.session_state.search_results:
+        rows = st.session_state.search_results
+        
+        # 1. Hiển thị dạng bảng
+        df_display = pd.DataFrame(rows, columns=[
+            "Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", 
+            "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"
+        ])
+        
+        def clean_fmt(x):
+            if pd.isna(x) or str(x).lower() in ['none', 'nan', 'nat', '']: return ""
+            return str(x)
+        for col in df_display.columns:
+            df_display[col] = df_display[col].apply(clean_fmt)
+        
+        df_display["CCCD"] = df_display["CCCD"].apply(lambda x: f"{x[:3]}***{x[-3:]}" if len(x) >= 6 else x)
+        for d_col in ["Ngày sinh", "Hạn thẻ"]:
+            df_display[d_col] = pd.to_datetime(df_display[d_col], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
+
+        st.success(f"Tìm thấy {len(rows)} kết quả.")
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+        
+        # 2. Xem chi tiết quá trình (Cố định dưới bảng kết quả)
+        st.write("---")
+        st.subheader("📜 Xem quá trình BHXH chi tiết")
+        options = [f"{r[2]} ({r[0]})" for r in rows]
+        
+        # Dùng key để Streamlit quản lý trạng thái selectbox độc lập
+        sel = st.selectbox("Chọn người tham gia cần xem lịch sử:", options=["-- Mời chọn --"] + options, key="selected_bhxh_person")
+        
+        if sel != "-- Mời chọn --":
+            ms_sel = re.search(r"\((.*?)\)", sel).group(1)
+            conn = get_db_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (ms_sel,))
+                    h_rows = cur.fetchall()
+                    if h_rows:
+                        st.table(pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"]).style.format({"Mức đóng": "{:,.0f}đ"}))
+                        log_activity("VIEW_DETAIL", {"msbhxh": ms_sel})
+                    else: 
+                        st.warning("Hệ thống chưa có lịch sử chi tiết cho mã số này. Vui lòng nạp file PDF Mẫu 07/SBH.")
+                conn.close()
+    elif st.session_state.search_results == []:
+        st.warning("Không tìm thấy dữ liệu phù hợp.")
 
 elif choice == "🧮 Tiện ích tính toán":
     st.header("🧮 Công cụ hỗ trợ thu BHYT & BHXH")
