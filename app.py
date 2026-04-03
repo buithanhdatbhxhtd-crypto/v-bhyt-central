@@ -256,7 +256,7 @@ if st.session_state.user is None:
                         log_activity("LOGIN", {"status": "success"}); st.rerun()
     st.stop()
 
-# --- SIDEBAR ---
+# --- SIDEBAR (LIỆT KÊ TRỰC TIẾP) ---
 st.sidebar.title("🛡️ V-BHYT PRO")
 st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
@@ -304,50 +304,63 @@ elif choice == "🔍 Tra cứu & Quá trình":
             q_s = ""
 
     if st.button("🚀 Thực hiện tra cứu", use_container_width=True):
-        # SỬA LỖI: Gọi hàm Cached để tăng tốc độ
         rows = perform_search(stype, q_m, q_s, sfilter, slimit, st.session_state.threshold)
         log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(rows)})
         
         if rows:
-            st.success(f"Tìm thấy {len(rows)} kết quả.")
-            for r in rows:
-                with st.container(border=True):
-                    # Làm sạch NaN trước khi hiển thị
-                    def clean(v): return str(v) if v and str(v).lower() not in ['none', 'nan', ''] else ""
-                    
-                    c1, c2, c3, c4 = st.columns([3.5, 3, 3.5, 2.5])
-                    ms = clean(r[0]); name = clean(r[2])
-                    dob = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
-                    cccd_raw = clean(r[4])
-                    cccd_d = f"{cccd_raw[:3]}***{cccd_raw[-3:]}" if len(cccd_raw) >= 6 else cccd_raw
-                    addr = clean(r[5]) if clean(r[5]) else "Chưa rõ địa chỉ"
-                    sdt = clean(r[6])
-                    han = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else "N/A"
+            # --- HIỂN THỊ DẠNG BẢNG (X-LUC GIỐNG EXCEL - SIÊU TỐC) ---
+            df_display = pd.DataFrame(rows, columns=[
+                "Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", 
+                "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"
+            ])
+            
+            # Làm sạch dữ liệu hiển thị (Xóa NaN, None)
+            df_display = df_display.fillna("")
+            for col in df_display.columns:
+                df_display[col] = df_display[col].apply(lambda x: str(x) if x is not None and str(x).lower() != 'none' else "")
+            
+            # Che CCCD bảo mật
+            def mask_cccd(val):
+                if val and len(str(val)) >= 6: return f"{str(val)[:3]}***{str(val)[-3:]}"
+                return val
+            df_display["CCCD"] = df_display["CCCD"].apply(mask_cccd)
+            
+            # Định dạng ngày tháng
+            for date_col in ["Ngày sinh", "Hạn thẻ"]:
+                df_display[date_col] = pd.to_datetime(df_display[date_col], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
 
-                    with c1:
-                        st.markdown(f"**{name}**")
-                        st.caption(f"🆔 {ms}")
-                        st.caption(f"🎂 {dob} | 🪪 {cccd_d}")
-                    with c2:
-                        st.caption(f"📍 {addr}")
-                        if sdt: st.markdown(f"📞 `{sdt}`")
-                    with c3:
-                        if r[9]: st.success(f"📈 {r[9]}")
-                        else: st.info("💡 Chưa có quá trình")
-                        st.caption(f"🏥 Hạn BHYT: {han}")
-                    with c4:
-                        with st.expander("📜 Chi tiết", expanded=False):
-                            conn = get_db_connection()
-                            if conn:
-                                with conn.cursor() as cur:
-                                    cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (ms,))
-                                    h_rows = cur.fetchall()
-                                    if h_rows:
-                                        df_h = pd.DataFrame(h_rows, columns=["Từ", "Đến", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"])
-                                        st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}), use_container_width=True, hide_index=True)
-                                    else: st.warning("Trống")
-                                conn.close()
-        else: st.warning("Không tìm thấy dữ liệu.")
+            st.success(f"Tìm thấy {len(rows)} kết quả.")
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
+            
+            # --- CHI TIẾT QUÁ TRÌNH THEO YÊU CẦU ---
+            st.write("---")
+            st.subheader("📜 Tra cứu lịch sử BHXH chi tiết")
+            st.info("💡 Để xem quá trình đóng chi tiết, vui lòng chọn tên người tham gia dưới đây:")
+            
+            # Tạo danh sách chọn từ kết quả tìm được
+            person_map = {f"{r[2]} ({r[0]})": r[0] for r in rows}
+            selected_label = st.selectbox("Chọn người tham gia:", options=["-- Chọn một người --"] + list(person_map.keys()))
+            
+            if selected_label != "-- Chọn một người --":
+                ms_selected = person_map[selected_label]
+                conn = get_db_connection()
+                if conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh 
+                            FROM bhxh_history 
+                            WHERE ma_so_bhxh = %s 
+                            ORDER BY to_date(tu_thang, 'MM/YYYY') ASC
+                        """, (ms_selected,))
+                        h_rows = cur.fetchall()
+                        if h_rows:
+                            df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
+                            st.table(df_h.style.format({"Mức đóng": "{:,.0f}đ"}))
+                        else:
+                            st.warning("Người này chưa được nạp file PDF quá trình (Mẫu 07/SBH).")
+                    conn.close()
+        else:
+            st.warning("Không tìm thấy dữ liệu.")
 
 elif choice == "🧮 Tiện ích tính toán":
     st.header("🧮 Công cụ hỗ trợ thu BHYT & BHXH")
