@@ -28,7 +28,7 @@ def init_supabase():
 
 supabase: Client = init_supabase()
 
-# Kết nối Database trực tiếp
+# Kết nối Database trực tiếp (Postgres)
 def get_db_connection():
     try:
         conn = psycopg2.connect(st.secrets["SUPABASE_DB_URL"], connect_timeout=10)
@@ -82,6 +82,7 @@ def admin_manage_user(target_email, action, new_password=None):
 # --- 3. HÀM GHI NHẬT KÝ & THỐNG KÊ ---
 
 def log_activity(action, details_dict):
+    """Ghi nhận mọi thao tác vào bảng audit_logs"""
     if not st.session_state.user: return
     conn = get_db_connection()
     if conn:
@@ -98,6 +99,7 @@ def log_activity(action, details_dict):
         finally: conn.close()
 
 def get_advanced_stats():
+    """Lấy dữ liệu cho Dashboard"""
     conn = get_db_connection()
     if not conn: return None
     stats = {}
@@ -116,12 +118,12 @@ def get_advanced_stats():
         return stats
     finally: conn.close()
 
-# --- 4. LOGIC XỬ LÝ DỮ LIỆU (IMPORT/EXPORT/PDF) ---
+# --- 4. LOGIC XỬ LÝ DỮ LIỆU PDF ---
 
 def parse_bhxh_pdf(pdf_file):
     """Trích xuất dữ liệu từ file PDF quá trình đóng BHXH (Mẫu 07/SBH) và lọc trùng"""
     history_data = []
-    seen_records = set() # Sử dụng set để lọc trùng tuyệt đối
+    seen_records = set() 
     msbhxh = ""
     summary_text = ""
     
@@ -130,12 +132,10 @@ def parse_bhxh_pdf(pdf_file):
         for page in pdf.pages:
             full_text += page.extract_text() + "\n"
         
-        # Tìm mã số BHXH
         match_ms = re.search(r"Mã số BHXH\s*:\s*(\d+)", full_text)
         if match_ms:
             msbhxh = match_ms.group(1).strip()
             
-        # Tìm thời gian tổng cộng (Cả BHXH và BHTN)
         match_bhxh = re.search(r"Thời gian đóng BHXH vào quỹ hưu trí.*?là\s*(.*?)(?:\n|$)", full_text)
         match_bhtn = re.search(r"Thời gian đóng BHTN vào quỹ BHTN.*?là\s*(.*?)(?:\n|$)", full_text)
         
@@ -144,7 +144,6 @@ def parse_bhxh_pdf(pdf_file):
         if match_bhtn: sums.append(f"BHTN: {match_bhtn.group(1).strip()}")
         summary_text = " | ".join(sums)
             
-        # Trích xuất bảng
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
@@ -161,7 +160,6 @@ def parse_bhxh_pdf(pdf_file):
                         ty_le = str(row[6]).strip() if len(row) > 6 and row[6] else ""
                         loai_bh = "BHTN" if "BẢO HIỂM THẤT NGHIỆP" in don_vi.upper() else "BHXH"
                         
-                        # Tạo định danh bản ghi để kiểm tra trùng
                         record_id = (tu_thang, den_thang, don_vi, muc_dong, loai_bh)
                         if record_id not in seen_records:
                             seen_records.add(record_id)
@@ -176,15 +174,11 @@ def save_bhxh_history(msbhxh, data, summary):
     if not conn: return False
     try:
         cur = conn.cursor()
-        # 1. Lưu chi tiết quá trình
         cur.execute("DELETE FROM bhxh_history WHERE ma_so_bhxh = %s", (msbhxh,))
         sql_hist = "INSERT INTO bhxh_history (ma_so_bhxh, tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh) VALUES %s"
         execute_values(cur, sql_hist, data)
-        
-        # 2. Cập nhật tổng thời gian vào bảng participants
         if summary:
             cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = %s WHERE ma_so_bhxh = %s", (summary, msbhxh))
-        
         conn.commit()
         return True
     except Exception:
@@ -192,6 +186,7 @@ def save_bhxh_history(msbhxh, data, summary):
     finally: conn.close()
 
 def import_db_logic(df):
+    """Nạp dữ liệu từ Excel (.xlsb, .xlsx)"""
     df.columns = [str(c).strip().lower() for c in df.columns]
     mapping = {'ma so bhxh': 'ma_so_bhxh', 'mã số bhxh': 'ma_so_bhxh', 'ho ten': 'ho_ten', 'ngay sinh': 'ngay_sinh',
                'cccd': 'cccd', 'sdt': 'sdt', 'diachilh': 'dia_chi', 'hantheden': 'han_the', 'email': 'email'}
@@ -267,7 +262,7 @@ if choice == "📊 Dashboard":
         c1.metric("Tổng bản ghi", f"{stats['total']:,}")
         c2.metric("Đã hết hạn BHYT", f"{stats['expired']:,}", delta_color="inverse")
         c3.metric("Sắp hết hạn", f"{stats['expiring']:,}")
-        c4.metric("Lượt tải dữ liệu", f"{stats.get('total_exports', 0):,}", delta="Security Log", delta_color="off")
+        c4.metric("Lượt tải dữ liệu", f"{stats.get('total_exports', 0):,}", delta="An ninh", delta_color="off")
         
         st.write("---")
         col_chart1, col_chart2 = st.columns(2)
@@ -301,7 +296,6 @@ elif choice == "🔍 Tra cứu & Quá trình":
         if not conn: st.error("Lỗi kết nối CSDL"); st.stop()
         cur = conn.cursor()
         try:
-            # Lấy thêm cột tong_thoi_gian_bhxh
             fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
             where, params = "", {'limit': slimit, 'th': st.session_state.threshold}
             if stype == "Mã BHXH":
@@ -332,18 +326,15 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 for r in rows:
                     with st.container(border=True):
                         col_info, col_act = st.columns([3, 1])
-                        # Làm sạch dữ liệu NaN cho hiển thị
                         r_sdt = r[6] if r[6] and str(r[6]) != 'None' and str(r[6]) != 'nan' else 'Chưa có'
                         r_email = r[7] if r[7] and str(r[7]) != 'None' and str(r[7]) != 'nan' else 'Chưa có'
                         
                         with col_info:
                             st.subheader(f"👤 {r[2]}")
-                            # HIỂN THỊ TỔNG THỜI GIAN ĐÓNG NỔI BẬT
                             if r[9]:
                                 st.markdown(f"🏆 **Quá trình tham gia:** <span style='background-color:#E3F2FD; color:#1E88E5; padding:5px 12px; border-radius:15px; font-weight:bold; border: 1px solid #1E88E5;'>{r[9]}</span>", unsafe_allow_html=True)
                             else:
                                 st.caption("💡 Chưa có dữ liệu tổng quát. Hãy nạp file PDF quá trình để cập nhật.")
-                                
                             st.write(f"📍 **Địa chỉ:** {r[5]}")
                             st.write(f"🆔 **Mã BHXH:** `{r[0]}` | **CCCD:** `{str(r[4])[:3]}****{str(r[4])[-3:]}`")
                             st.write(f"📅 **Ngày sinh:** {pd.to_datetime(r[3]).strftime('%d/%m/%Y')} | **Hạn BHYT:** {pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'}")
@@ -353,9 +344,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             st.write(f"📞 `{r_sdt}`")
                             st.write(f"📧 `{r_email}`")
 
-                        # --- EXPANDER XEM QUÁ TRÌNH ---
                         with st.expander(f"📜 Xem chi tiết lịch sử đóng BHXH của {r[2]}", expanded=False):
-                            # SỬA LỖI SẮP XẾP: Chuyển tu_thang sang kiểu Date để ORDER BY chính xác theo trình tự tăng dần
                             cur.execute("""
                                 SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh 
                                 FROM bhxh_history 
@@ -365,12 +354,9 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             h_rows = cur.fetchall()
                             if h_rows:
                                 df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
-                                
-                                # Áp dụng màu sắc để phân biệt BHXH và BHTN
                                 def style_row(row):
                                     color = 'color: #1a73e8; font-weight: bold;' if row['Loại'] == 'BHXH' else 'color: #5f6368;'
                                     return [color] * len(row)
-                                
                                 st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}).apply(style_row, axis=1), 
                                              use_container_width=True, hide_index=True)
                                 log_activity("VIEW_HISTORY", {"msbhxh": r[0]})
@@ -389,7 +375,7 @@ elif choice == "🧮 Tiện ích tính toán":
                 if all(c in set("0123456789+-*/.() ") for c in calc_exp): st.markdown(f"### Kết quả: `{eval(calc_exp):,.2f}`")
             except: st.error("Lỗi tính toán.")
     with t2:
-        num = st.number_input("Số người tham gia", 1, 10, 5)
+        num = st.number_input("Số người tham gia", 1, 10, 1)
         m1 = 2340000 * 0.045
         prices = [round(m1 if i==1 else m1*0.7 if i==2 else m1*0.6 if i==3 else m1*0.5 if i==4 else m1*0.4) for i in range(1, num+1)]
         df_b = pd.DataFrame({"Người thứ": range(1, num+1), "Mức giảm": (["100%", "70%", "60%", "50%"] + ["40%"]*6)[:num], "Số tiền/12 tháng": [p*12 for p in prices]})
@@ -424,7 +410,6 @@ elif choice == "📥 Nhập dữ liệu":
                 if ms and data:
                     if save_bhxh_history(ms, data, summary):
                         st.success(f"✅ Đã cập nhật thành công giai đoạn đóng và tổng quát cho Mã số: {ms}")
-                        if summary: st.info(f"📊 **Dữ liệu tổng hợp:** {summary}")
                         log_activity("IMPORT_PDF", {"ms": ms, "rows": len(data)})
                     else: st.error("Lỗi khi lưu vào cơ sở dữ liệu.")
                 else: st.error("Không tìm thấy dữ liệu hợp lệ trong file PDF này.")
@@ -497,7 +482,7 @@ elif choice == "🗑️ Dọn dẹp":
                     st.success("Đã dọn sạch dữ liệu BHXH!"); time.sleep(1); st.rerun()
 
     # MỤC 3: XÓA NHẬT KÝ HOẠT ĐỘNG
-    with st.expander("📜 Dọn dẹp Nhật ký hệ thống", expanded=False):
+    with st.expander("📜 Dọn dẹp Nhật ký hệ thống", expanded=True):
         st.warning("⚠️ Cảnh báo: Hành động này sẽ xóa sạch toàn bộ lịch sử thao tác của tất cả người dùng.")
         if st.checkbox("Tôi xác nhận muốn xóa sạch nhật ký", key="chk_del_logs"):
             if st.button("🔴 THỰC HIỆN XÓA NHẬT KÝ", key="btn_del_logs"):
