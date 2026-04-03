@@ -38,15 +38,19 @@ def get_db_connection():
         return None
 
 # --- 2. HÀM TIỆN ÍCH HIỂN THỊ KÈM COPY INLINE ---
-def st_copy_inline(label, text, is_bold=False, color="#31333F"):
-    """Hiển thị nhãn + nội dung + nút copy trên cùng 1 dòng"""
+def st_copy_inline(label, text, is_bold=False, color="#31333F", display_text=None):
+    """Hiển thị nhãn + nội dung + nút copy trên cùng 1 dòng. 
+    Hỗ trợ hiển thị một kiểu (display_text) và copy một kiểu (text)."""
     if not text or str(text).lower() in ['none', 'nan', '']:
         text = "N/A"
+    
+    # Nếu không truyền display_text, mặc định hiển thị text gốc
+    d_text = display_text if display_text else text
     
     weight = "bold" if is_bold else "normal"
     html = f"""
     <div style="display: flex; align-items: center; font-family: sans-serif; font-size: 13px; margin-bottom: 2px;">
-        <span style="color: {color}; font-weight: {weight}; white-space: nowrap;">{label} {text}</span>
+        <span style="color: {color}; font-weight: {weight}; white-space: nowrap;">{label} {d_text}</span>
         <button onclick="copyToClipboard('{text}')" style="
             margin-left: 6px;
             padding: 0px 4px;
@@ -364,22 +368,26 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 st.success(f"Tìm thấy {len(rows)} kết quả.")
                 for r in rows:
                     with st.container(border=True):
-                        # --- GIAO DIỆN THEO DÒNG TỐI ƯU (CẬP NHẬT: DÒNG 221-255) ---
                         c1, c2, c3, c4 = st.columns([3.5, 2.5, 3.5, 2.5])
                         
                         full_name = str(r[2])
                         msbhxh = str(r[0])
                         dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
-                        cccd_val = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else 'N/A'
                         
-                        # Cột 1: Danh tính quan trọng (Có Copy)
+                        # --- XỬ LÝ CCCD: Hiển thị 3 đầu 3 cuối, sao chép toàn bộ ---
+                        cccd_raw = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else 'N/A'
+                        cccd_display = cccd_raw
+                        if cccd_raw != 'N/A' and len(cccd_raw) >= 6:
+                            cccd_display = f"{cccd_raw[:3]}***{cccd_raw[-3:]}"
+                        
+                        # Cột 1: Danh tính quan trọng
                         with c1:
                             st_copy_inline("", full_name, is_bold=True)
                             st_copy_inline("🆔", msbhxh)
                             st_copy_inline("🎂", dob_str)
-                            st_copy_inline("🪪", cccd_val)
+                            st_copy_inline("🪪", cccd_raw, display_text=cccd_display)
                         
-                        # Cột 2: Địa chỉ & Liên hệ (Làm sạch NaN)
+                        # Cột 2: Địa chỉ & Liên hệ
                         with c2:
                             r_addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else 'Chưa có địa chỉ'
                             r_sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan', ''] else 'Chưa có SĐT'
