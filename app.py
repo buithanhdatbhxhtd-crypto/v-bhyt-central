@@ -243,13 +243,14 @@ def import_db_logic(df):
         df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df[col] = df[col].where(~df[col].isin(['nan', 'None', 'NAT', 'NaT', '']), None)
     data = list(df[target].itertuples(index=False, name=None))
+    
+    # --- THAY ĐỔI LOGIC: SỬ DỤNG DO NOTHING ĐỂ BỎ QUA NGƯỜI TRÙNG ---
     sql = """
         INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
-        VALUES %s ON CONFLICT (ma_so_bhxh) DO UPDATE SET
-            ma_the_bhyt = EXCLUDED.ma_the_bhyt, ho_ten = EXCLUDED.ho_ten, ngay_sinh = EXCLUDED.ngay_sinh,
-            cccd = EXCLUDED.cccd, dia_chi = EXCLUDED.dia_chi, sdt = EXCLUDED.sdt, email = EXCLUDED.email, 
-            han_the = EXCLUDED.han_the, updated_at = NOW();
+        VALUES %s 
+        ON CONFLICT (ma_so_bhxh) DO NOTHING;
     """
+    
     for i in range(0, len(data), 5000):
         batch = data[i:i + 5000]
         conn = get_db_connection()
