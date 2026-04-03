@@ -37,37 +37,40 @@ def get_db_connection():
     except Exception:
         return None
 
-# --- 2. HÀM TIỆN ÍCH COPY NHANH ---
-def st_copy_button(text):
-    """Tạo một nút copy nhỏ gọn bằng HTML/JS"""
-    copy_html = f"""
-        <div style="display: inline-block; margin-left: 5px;">
-            <button onclick="copyToClipboard('{text}')" style="
-                padding: 2px 8px;
-                font-size: 11px;
-                cursor: pointer;
-                border-radius: 4px;
-                border: 1px solid #ddd;
-                background: #f8f9fa;
-                color: #1E88E5;
-                font-weight: bold;
-                transition: 0.3s;
-            " onmouseover="this.style.background='#e3f2fd'" onmouseout="this.style.background='#f8f9fa'">
-                📋 Copy
-            </button>
-        </div>
-        <script>
-        function copyToClipboard(text) {{
-            const el = document.createElement('textarea');
-            el.value = text;
-            document.body.appendChild(el);
-            el.select();
-            document.execCommand('copy');
-            document.body.removeChild(el);
-        }}
-        </script>
+# --- 2. HÀM TIỆN ÍCH HIỂN THỊ KÈM COPY INLINE ---
+def st_copy_inline(label, text, is_bold=False, color="#31333F"):
+    """Hiển thị nhãn + nội dung + nút copy trên cùng 1 dòng"""
+    weight = "bold" if is_bold else "normal"
+    html = f"""
+    <div style="display: flex; align-items: center; font-family: sans-serif; font-size: 14px; margin-bottom: 2px;">
+        <span style="color: {color}; font-weight: {weight}; white-space: nowrap;">{label} {text}</span>
+        <button onclick="copyToClipboard('{text}')" style="
+            margin-left: 6px;
+            padding: 0px 4px;
+            font-size: 10px;
+            cursor: pointer;
+            border-radius: 3px;
+            border: 1px solid #dcdcdc;
+            background: #ffffff;
+            color: #1E88E5;
+            height: 18px;
+            line-height: 16px;
+            display: flex;
+            align-items: center;
+        " title="Sao chép">📋</button>
+    </div>
+    <script>
+    function copyToClipboard(text) {{
+        const el = document.createElement('textarea');
+        el.value = text;
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+    }}
+    </script>
     """
-    components.html(copy_html, height=28)
+    components.html(html, height=22)
 
 # --- 3. LOGIC XÁC THỰC & QUẢN TRỊ ---
 
@@ -358,24 +361,20 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 st.success(f"Tìm thấy {len(rows)} kết quả.")
                 for r in rows:
                     with st.container(border=True):
-                        # --- CHỈNH SỬA GIAO DIỆN THEO DÒNG CÓ NÚT COPY ---
+                        # --- GIAO DIỆN THEO DÒNG CÓ NÚT COPY INLINE ---
                         c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
                         
-                        # Chuẩn bị dữ liệu để copy
+                        # Chuẩn bị dữ liệu
                         full_name = r[2]
                         msbhxh = r[0]
                         dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y')
+                        cccd_masked = f"{str(r[4])[:3]}***{str(r[4])[-3:]}" if r[4] else "N/A"
                         
-                        # Cột 1: Thông tin danh tính + Nút copy
+                        # Cột 1: Danh tính (Họ tên & Mã số)
                         with c1:
-                            st.write(f"**{full_name}**")
-                            st_copy_button(full_name)
-                            
-                            st.caption(f"🆔 {msbhxh}")
-                            st_copy_button(msbhxh)
-                            
-                            st.caption(f"🎂 {dob_str}")
-                            st_copy_button(dob_str)
+                            st_copy_inline("", full_name, is_bold=True)
+                            st_copy_inline("🆔", msbhxh)
+                            st_copy_inline("🎂", dob_str)
                         
                         # Cột 2: Địa chỉ & Liên hệ
                         with c2:
@@ -383,16 +382,16 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             r_sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan'] else 'Chưa có SĐT'
                             st.markdown(f"📞 `{r_sdt}`")
                         
-                        # Cột 3: Tổng quá trình (Hiện ở cuối dòng)
+                        # Cột 3: Trạng thái & Quá trình
                         with c3:
                             if r[9]:
                                 st.success(f"📈 {r[9]}")
                             else:
                                 st.info("💡 Chưa nạp PDF quá trình")
                             expiry_str = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'
-                            st.caption(f"🏥 Hạn thẻ BHYT: {expiry_str}")
+                            st.caption(f"🏥 Hạn BHYT: {expiry_str}")
 
-                        # Cột 4: Nút tra cứu quá trình (Cuối dòng)
+                        # Cột 4: Nút tra cứu quá trình
                         with c4:
                             with st.expander("📜 Tra cứu BHXH", expanded=False):
                                 cur.execute("""
@@ -400,7 +399,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
                                     FROM bhxh_history 
                                     WHERE ma_so_bhxh = %s 
                                     ORDER BY to_date(tu_thang, 'MM/YYYY') ASC
-                                """, (r[0].strip(),))
+                                """, (msbhxh.strip(),))
                                 h_rows = cur.fetchall()
                                 if h_rows:
                                     df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
@@ -409,7 +408,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
                                         return [color] * len(row)
                                     st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}).apply(style_row, axis=1), 
                                                  use_container_width=True, hide_index=True)
-                                    log_activity("VIEW_HISTORY", {"msbhxh": r[0]})
+                                    log_activity("VIEW_HISTORY", {"msbhxh": msbhxh})
                                 else:
                                     st.warning("Vui lòng nạp PDF Mẫu 07/SBH.")
             else: st.warning("Không tìm thấy dữ liệu.")
