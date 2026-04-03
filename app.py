@@ -198,10 +198,23 @@ def save_bhxh_history(msbhxh, data, summary):
     finally: conn.close()
 
 def import_db_logic(df):
-    """Nạp dữ liệu an toàn dùng bảng tạm để tránh lỗi UniqueViolation"""
+    """Nạp dữ liệu an toàn dùng bảng tạm để tránh lỗi UniqueViolation và sửa lỗi ánh xạ tiêu đề"""
     df.columns = [str(c).strip().lower() for c in df.columns]
-    mapping = {'ma so bhxh': 'ma_so_bhxh', 'mã số bhxh': 'ma_so_bhxh', 'ho ten': 'ho_ten', 'ngay sinh': 'ngay_sinh',
-               'cccd': 'cccd', 'sdt': 'sdt', 'diachilh': 'dia_chi', 'hantheden': 'han_the', 'email': 'email'}
+    # Cập nhật mapping để nhận diện tiêu đề từ file Excel của người dùng
+    mapping = {
+        'ma so bhxh': 'ma_so_bhxh', 
+        'mã số bhxh': 'ma_so_bhxh', 
+        'ho ten': 'ho_ten', 
+        'ngay sinh': 'ngay_sinh',
+        'cccd': 'cccd', 
+        'socmnd': 'cccd',       # Ánh xạ từ file Excel của bạn
+        'sdt': 'sdt', 
+        'sodienthoai': 'sdt',   # Ánh xạ từ file Excel của bạn (fix lỗi không hiện SĐT)
+        'diachilh': 'dia_chi', 
+        'hantheden': 'han_the', 
+        'email': 'email',
+        'vss_email': 'email'    # Ánh xạ email từ file Excel của bạn
+    }
     df = df.rename(columns=mapping)
     target = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'dia_chi', 'sdt', 'email', 'han_the']
     for col in target:
@@ -256,7 +269,7 @@ if st.session_state.user is None:
                         log_activity("LOGIN", {"status": "success"}); st.rerun()
     st.stop()
 
-# --- SIDEBAR (LIỆT KÊ TRỰC TIẾP) ---
+# --- SIDEBAR ---
 st.sidebar.title("🛡️ V-BHYT PRO")
 st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
@@ -329,7 +342,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 return val
             df_display["CCCD"] = df_display["CCCD"].apply(mask_cccd)
             
-            # Định dạng ngày tháng (chỉ nếu có dữ liệu)
+            # Định dạng ngày tháng
             for date_col in ["Ngày sinh", "Hạn thẻ"]:
                 df_display[date_col] = pd.to_datetime(df_display[date_col], errors='coerce').dt.strftime('%d/%m/%Y')
                 df_display[date_col] = df_display[date_col].fillna("N/A")
@@ -342,12 +355,10 @@ elif choice == "🔍 Tra cứu & Quá trình":
             st.subheader("📜 Xem quá trình BHXH chi tiết")
             st.info("💡 Để xem bảng lịch sử chi tiết, vui lòng chọn một người từ danh sách kết quả phía trên:")
             
-            # Tạo danh sách chọn từ kết quả tìm được
             options_list = [f"{r[2]} ({r[0]})" for r in rows]
             selected_label = st.selectbox("Chọn người tham gia:", options=["-- Mời chọn người cần xem --"] + options_list)
             
             if selected_label != "-- Mời chọn người cần xem --":
-                # Trích xuất mã số BHXH từ nhãn (phần trong ngoặc)
                 ms_selected = re.search(r"\((.*?)\)", selected_label).group(1)
                 conn = get_db_connection()
                 if conn:
