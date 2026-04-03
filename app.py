@@ -208,7 +208,7 @@ def save_bhxh_history(msbhxh, data, summary):
     finally: conn.close()
 
 def import_db_logic(df):
-    """Nạp dữ liệu an toàn, tự động loại bỏ trùng lặp trong nội bộ file và DB"""
+    """Nạp dữ liệu cực kỳ an toàn sử dụng bảng tạm để đối soát trùng lặp BHXH và CCCD"""
     df.columns = [str(c).strip().lower() for c in df.columns]
     mapping = {'ma so bhxh': 'ma_so_bhxh', 'mã số bhxh': 'ma_so_bhxh', 'ho ten': 'ho_ten', 'ngay sinh': 'ngay_sinh',
                'cccd': 'cccd', 'sdt': 'sdt', 'diachilh': 'dia_chi', 'hantheden': 'han_the', 'email': 'email'}
@@ -217,61 +217,59 @@ def import_db_logic(df):
     for col in target:
         if col not in df.columns: df[col] = None
     
-    # 1. Làm sạch dữ liệu và xử lý giá trị trống
+    # 1. Làm sạch dữ liệu
     for col in ['ngay_sinh', 'han_the']:
         df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).apply(lambda x: x.date() if pd.notnull(x) else None)
     for col in ['ma_so_bhxh', 'ho_ten', 'cccd', 'sdt', 'email', 'dia_chi']:
         df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df[col] = df[col].where(~df[col].isin(['nan', 'None', 'NAT', 'NaT', '']), None)
     
-    # 2. Lấy dữ liệu hiện có từ DB để lọc trùng tuyệt đối (Fix UniqueViolation)
+    # 2. Lọc trùng nội bộ file Excel
+    df = df.drop_duplicates(subset=['ma_so_bhxh'], keep='first')
+    if 'cccd' in df.columns:
+        df_valid_cccd = df[df['cccd'].notnull()].drop_duplicates(subset=['cccd'], keep='first')
+        df = pd.concat([df_valid_cccd, df[df['cccd'].isnull()]])
+
+    data = list(df[target].itertuples(index=False, name=None))
+    if not data: return
+
     conn = get_db_connection()
     if not conn: return
     
-    existing_msbhxh = set()
-    existing_cccd = set()
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT ma_so_bhxh, cccd FROM participants")
-            for ms, cc in cur.fetchall():
-                if ms: existing_msbhxh.add(str(ms).strip())
-                if cc: existing_cccd.add(str(cc).strip())
+        cur = conn.cursor()
+        # 3. Tạo bảng tạm (Temporary Table) để chứa dữ liệu mới nạp
+        cur.execute("""
+            CREATE TEMP TABLE temp_import (
+                ma_so_bhxh VARCHAR(15), ma_the_bhyt VARCHAR(15), ho_ten TEXT, 
+                ngay_sinh DATE, cccd VARCHAR(12), dia_chi TEXT, 
+                sdt VARCHAR(15), email TEXT, han_the DATE
+            ) ON COMMIT DROP;
+        """)
+        
+        # 4. Đẩy dữ liệu vào bảng tạm
+        execute_values(cur, "INSERT INTO temp_import VALUES %s", data)
+        
+        # 5. Lệnh nạp chính: Chỉ chèn những người có mã BHXH và CCCD chưa từng tồn tại trong hệ thống
+        # Dùng NOT EXISTS để kiểm tra cả hai cột Unique mà không gây lỗi UniqueViolation
+        sql_insert = """
+            INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
+            SELECT t.ma_so_bhxh, t.ma_the_bhyt, t.ho_ten, t.ngay_sinh, t.cccd, t.dia_chi, t.sdt, t.email, t.han_the
+            FROM temp_import t
+            WHERE NOT EXISTS (
+                SELECT 1 FROM participants p 
+                WHERE p.ma_so_bhxh = t.ma_so_bhxh 
+                   OR (t.cccd IS NOT NULL AND p.cccd = t.cccd)
+            );
+        """
+        cur.execute(sql_insert)
+        conn.commit()
+        yield len(data)
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Lỗi nạp dữ liệu: {e}")
     finally:
         conn.close()
-
-    # 3. Lọc trùng nội bộ file
-    df = df.drop_duplicates(subset=['ma_so_bhxh'], keep='first')
-    valid_cccd = df[df['cccd'].notnull()].drop_duplicates(subset=['cccd'], keep='first')
-    df = pd.concat([valid_cccd, df[df['cccd'].isnull()]])
-
-    # 4. Lọc trùng với Database (Chỉ giữ lại người hoàn toàn mới)
-    df = df[~df['ma_so_bhxh'].isin(existing_msbhxh)]
-    # Lọc CCCD: Chỉ lọc những hàng có CCCD và CCCD đó đã tồn tại trong DB
-    if not df.empty:
-        df = df[~(df['cccd'].notnull() & df['cccd'].isin(existing_cccd))]
-
-    if df.empty:
-        st.warning("⚠️ Tất cả dữ liệu trong tệp này đều đã tồn tại trong hệ thống (trùng Mã BHXH hoặc CCCD).")
-        return
-
-    data = list(df[target].itertuples(index=False, name=None))
-    
-    # 5. Thực hiện nạp dữ liệu
-    sql = """
-        INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
-        VALUES %s 
-        ON CONFLICT (ma_so_bhxh) DO NOTHING;
-    """
-    
-    for i in range(0, len(data), 5000):
-        batch = data[i:i + 5000]
-        conn = get_db_connection()
-        if not conn: break
-        with conn.cursor() as cur:
-            execute_values(cur, sql, batch)
-            conn.commit()
-        conn.close()
-        yield min(i + 5000, len(data))
 
 # --- 6. GIAO DIỆN CHÍNH ---
 
@@ -373,7 +371,6 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 st.success(f"Tìm thấy {len(rows)} kết quả.")
                 for r in rows:
                     with st.container(border=True):
-                        # --- GIAO DIỆN THEO DÒNG TỐI ƯU ---
                         c1, c2, c3, c4 = st.columns([3.5, 3.5, 3.5, 2.5])
                         
                         msbhxh = str(r[0])
@@ -381,28 +378,24 @@ elif choice == "🔍 Tra cứu & Quá trình":
                         cccd_raw = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else 'N/A'
                         cccd_display = f"{cccd_raw[:3]}***{cccd_raw[-3:]}" if cccd_raw != 'N/A' and len(cccd_raw) >= 6 else cccd_raw
                         
-                        # Cột 1: Danh tính
                         with c1:
                             st_copy_inline("", str(r[2]), is_bold=True)
                             st_copy_inline("🆔", msbhxh)
                             st_copy_inline("🎂", dob_str)
                             st_copy_inline("🪪", cccd_raw, display_text=cccd_display)
                         
-                        # Cột 2: Địa chỉ & Liên hệ
                         with c2:
                             r_addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else 'Chưa rõ địa chỉ'
                             r_sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan', ''] else 'Chưa có SĐT'
                             st.caption(f"📍 {r_addr}")
                             st_copy_inline("📞", r_sdt)
                         
-                        # Cột 3: Quá trình & Trạng thái BHYT
                         with c3:
                             if r[9]: st.success(f"📈 {r[9]}")
                             else: st.info("💡 Chưa nạp PDF quá trình")
                             expiry_str = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'
                             st.caption(f"🏥 Hạn BHYT: {expiry_str}")
 
-                        # Cột 4: Nút tra cứu chi tiết
                         with c4:
                             with st.expander("📜 Tra cứu BHXH", expanded=False):
                                 cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (msbhxh.strip(),))
@@ -448,9 +441,11 @@ elif choice == "📥 Nhập dữ liệu":
             df = pd.read_excel(f, dtype=str)
             if st.button("🚀 Bắt đầu nạp BHYT"):
                 pb, txt = st.progress(0), st.empty()
+                processed = 0
                 for count in import_db_logic(df):
-                    pb.progress(count/len(df)); txt.text(f"Đã nạp {count:,} hàng...")
-                st.success("Cập nhật thành công!"); log_activity("IMPORT_EXCEL", {"rows": len(df)})
+                    processed += count
+                    pb.progress(1.0); txt.text(f"Đã xử lý xong {processed:,} hàng.")
+                st.success("Cập nhật thành công! Hệ thống đã tự động bỏ qua các bản ghi trùng lặp BHXH hoặc CCCD."); log_activity("IMPORT_EXCEL", {"rows": len(df)})
     with tp:
         pdf_f = st.file_uploader("Chọn file PDF (Mẫu 07/SBH)", type=["pdf"])
         if pdf_f and st.button("🔍 Phân tích và Lưu quá trình"):
