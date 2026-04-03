@@ -119,8 +119,9 @@ def get_advanced_stats():
 # --- 4. LOGIC XỬ LÝ DỮ LIỆU (IMPORT/EXPORT/PDF) ---
 
 def parse_bhxh_pdf(pdf_file):
-    """Trích xuất dữ liệu từ file PDF quá trình đóng BHXH (Mẫu 07/SBH)"""
+    """Trích xuất dữ liệu từ file PDF quá trình đóng BHXH (Mẫu 07/SBH) và lọc trùng"""
     history_data = []
+    seen_records = set() # Sử dụng set để lọc trùng tuyệt đối
     msbhxh = ""
     summary_text = ""
     
@@ -134,7 +135,7 @@ def parse_bhxh_pdf(pdf_file):
         if match_ms:
             msbhxh = match_ms.group(1).strip()
             
-        # Tìm thời gian tổng cộng (Cả BHXH và BHTN)
+        # Tìm thời gian tổng cộng
         match_bhxh = re.search(r"Thời gian đóng BHXH vào quỹ hưu trí.*?là\s*(.*?)(?:\n|$)", full_text)
         match_bhtn = re.search(r"Thời gian đóng BHTN vào quỹ BHTN.*?là\s*(.*?)(?:\n|$)", full_text)
         
@@ -159,7 +160,12 @@ def parse_bhxh_pdf(pdf_file):
                         muc_dong = float(muc_raw) if muc_raw.isdigit() else 0
                         ty_le = str(row[6]).strip() if len(row) > 6 and row[6] else ""
                         loai_bh = "BHTN" if "BẢO HIỂM THẤT NGHIỆP" in don_vi.upper() else "BHXH"
-                        history_data.append((msbhxh, tu_thang, den_thang, don_vi, muc_dong, ty_le, loai_bh))
+                        
+                        # Tạo định danh bản ghi để kiểm tra trùng
+                        record_id = (tu_thang, den_thang, don_vi, muc_dong, loai_bh)
+                        if record_id not in seen_records:
+                            seen_records.add(record_id)
+                            history_data.append((msbhxh, tu_thang, den_thang, don_vi, muc_dong, ty_le, loai_bh))
                     except: continue
                     
     return msbhxh, history_data, summary_text
@@ -170,15 +176,11 @@ def save_bhxh_history(msbhxh, data, summary):
     if not conn: return False
     try:
         cur = conn.cursor()
-        # 1. Lưu chi tiết quá trình
         cur.execute("DELETE FROM bhxh_history WHERE ma_so_bhxh = %s", (msbhxh,))
         sql_hist = "INSERT INTO bhxh_history (ma_so_bhxh, tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh) VALUES %s"
         execute_values(cur, sql_hist, data)
-        
-        # 2. Cập nhật tổng thời gian vào bảng participants
         if summary:
             cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = %s WHERE ma_so_bhxh = %s", (summary, msbhxh))
-        
         conn.commit()
         return True
     except Exception:
@@ -295,7 +297,6 @@ elif choice == "🔍 Tra cứu & Quá trình":
         if not conn: st.error("Lỗi kết nối CSDL"); st.stop()
         cur = conn.cursor()
         try:
-            # Lấy thêm cột tong_thoi_gian_bhxh
             fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
             where, params = "", {'limit': slimit, 'th': st.session_state.threshold}
             if stype == "Mã BHXH":
@@ -326,13 +327,11 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 for r in rows:
                     with st.container(border=True):
                         col_info, col_act = st.columns([3, 1])
-                        # Làm sạch dữ liệu NaN cho hiển thị
                         r_sdt = r[6] if r[6] and str(r[6]) != 'None' and str(r[6]) != 'nan' else 'Chưa có'
                         r_email = r[7] if r[7] and str(r[7]) != 'None' and str(r[7]) != 'nan' else 'Chưa có'
                         
                         with col_info:
                             st.subheader(f"👤 {r[2]}")
-                            # HIỂN THỊ TỔNG THỜI GIAN ĐÓNG NỔI BẬT
                             if r[9]:
                                 st.markdown(f"🏆 **Quá trình tham gia:** <span style='background-color:#E3F2FD; color:#1E88E5; padding:5px 12px; border-radius:15px; font-weight:bold; border: 1px solid #1E88E5;'>{r[9]}</span>", unsafe_allow_html=True)
                             else:
@@ -347,9 +346,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             st.write(f"📞 `{r_sdt}`")
                             st.write(f"📧 `{r_email}`")
 
-                        # --- EXPANDER XEM QUÁ TRÌNH ---
                         with st.expander(f"📜 Xem chi tiết lịch sử đóng BHXH của {r[2]}", expanded=False):
-                            # SỬA LỖI SẮP XẾP: Chuyển tu_thang sang kiểu Date để ORDER BY chính xác theo trình tự tăng dần
                             cur.execute("""
                                 SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh 
                                 FROM bhxh_history 
@@ -360,12 +357,13 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             if h_rows:
                                 df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
                                 
-                                # Tạo Style để dễ phân biệt BHXH và BHTN
-                                def highlight_type(row):
-                                    color = '#f8f9fa' if row['Loại'] == 'BHXH' else '#eef2ff'
-                                    return [f'background-color: {color}'] * len(row)
+                                # Áp dụng màu sắc để phân biệt BHXH và BHTN
+                                def style_row(row):
+                                    color = 'color: #1a73e8; font-weight: bold;' if row['Loại'] == 'BHXH' else 'color: #5f6368;'
+                                    return [color] * len(row)
                                 
-                                st.table(df_h.style.format({"Mức đóng": "{:,.0f}đ"}))
+                                st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}).apply(style_row, axis=1), 
+                                             use_container_width=True, hide_index=True)
                                 log_activity("VIEW_HISTORY", {"msbhxh": r[0]})
                             else:
                                 st.warning("Chưa có dữ liệu bảng chi tiết. Vui lòng nạp file PDF (Mẫu 07/SBH) trong mục 'Nhập dữ liệu'.")
@@ -484,7 +482,6 @@ elif choice == "🗑️ Dọn dẹp":
                 if conn:
                     with conn.cursor() as cur:
                         cur.execute("TRUNCATE TABLE bhxh_history RESTART IDENTITY")
-                        # Xóa luôn cột tổng thời gian trong bảng chính để thông tin hiển thị chính xác
                         cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = NULL")
                     conn.commit(); conn.close()
                     log_activity("DELETE_ALL_BHXH", {"status": "success"})
