@@ -37,9 +37,9 @@ def get_db_connection():
     except Exception:
         return None
 
-# --- 2. HÀM TIỆN ÍCH HIỂN THỊ KÈM COPY INLINE ---
+# --- 2. HÀM TIỆN ÍCH HIỂN THỊ KÈM COPY INLINE (ĐÃ FIX LỖI HIỂN THỊ) ---
 def st_copy_inline(label, text, is_bold=False, color="#31333F", display_text=None):
-    """Hiển thị nhãn + nội dung + nút copy trên cùng 1 dòng, cực kỳ nhỏ gọn"""
+    """Hiển thị nhãn + nội dung + nút copy trên cùng 1 dòng, đã fix lỗi bị ẩn chân chữ"""
     if not text or str(text).lower() in ['none', 'nan', '']:
         text_to_show = "N/A"
         has_data = False
@@ -50,37 +50,41 @@ def st_copy_inline(label, text, is_bold=False, color="#31333F", display_text=Non
     weight = "bold" if is_bold else "normal"
     button_style = "display: flex;" if has_data else "display: none;"
     
+    # Tinh chỉnh HTML: Thêm margin:0 cho body và tăng line-height
     html = f"""
-    <div style="display: flex; align-items: center; font-family: sans-serif; font-size: 13px; margin-right: 15px; height: 24px;">
-        <span style="color: {color}; font-weight: {weight}; white-space: nowrap;">{label} {text_to_show}</span>
-        <button onclick="copyToClipboard('{text}')" style="
-            {button_style}
-            margin-left: 4px;
-            padding: 0px 3px;
-            font-size: 9px;
-            cursor: pointer;
-            border-radius: 3px;
-            border: 1px solid #e0e0e0;
-            background: #ffffff;
-            color: #1E88E5;
-            height: 16px;
-            line-height: 14px;
-            align-items: center;
-            justify-content: center;
-        " title="Sao chép">📋</button>
-    </div>
-    <script>
-    function copyToClipboard(text) {{
-        const el = document.createElement('textarea');
-        el.value = text;
-        document.body.appendChild(el);
-        el.select();
-        document.execCommand('copy');
-        document.body.removeChild(el);
-    }}
-    </script>
+    <body style="margin: 0; padding: 0; overflow: hidden; background: transparent;">
+        <div style="display: flex; align-items: center; font-family: sans-serif; font-size: 14px; height: 30px; line-height: 1.2;">
+            <span style="color: {color}; font-weight: {weight}; white-space: nowrap;">{label} {text_to_show}</span>
+            <button onclick="copyToClipboard('{text}')" style="
+                {button_style}
+                margin-left: 8px;
+                padding: 1px 5px;
+                font-size: 10px;
+                cursor: pointer;
+                border-radius: 4px;
+                border: 1px solid #dcdcdc;
+                background: #ffffff;
+                color: #1E88E5;
+                height: 20px;
+                align-items: center;
+                justify-content: center;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+            " title="Sao chép">📋</button>
+        </div>
+        <script>
+        function copyToClipboard(text) {{
+            const el = document.createElement('textarea');
+            el.value = text;
+            document.body.appendChild(el);
+            el.select();
+            document.execCommand('copy');
+            document.body.removeChild(el);
+        }}
+        </script>
+    </body>
     """
-    components.html(html, height=24)
+    # Tăng height lên 32 để đảm bảo không bị cắt chân chữ
+    components.html(html, height=32)
 
 # --- 3. LOGIC XÁC THỰC & QUẢN TRỊ ---
 
@@ -291,18 +295,16 @@ if st.session_state.user is None:
                         st.rerun()
     st.stop()
 
-# --- SIDEBAR (CẬP NHẬT GIAO DIỆN LIỆT KÊ TRỰC TIẾP) ---
+# --- SIDEBAR (LIỆT KÊ TRỰC TIẾP) ---
 st.sidebar.title("🛡️ V-BHYT PRO")
 st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
 st.sidebar.caption(role_label)
 
-# Danh sách menu tùy biến theo quyền hạn
 menu_options = ["📊 Dashboard", "🔍 Tra cứu & Quá trình", "🧮 Tiện ích tính toán", "⚙️ Tài khoản"]
 if is_admin():
     menu_options += ["📥 Nhập dữ liệu", "📜 Nhật ký hệ thống", "👥 Quản lý nhân sự", "🔧 Cấu hình", "🗑️ Dọn dẹp"]
 
-# Sử dụng radio để liệt kê trực tiếp ra sidebar
 choice = st.sidebar.radio("Danh mục quản lý", menu_options, label_visibility="collapsed")
 
 st.sidebar.markdown("---")
@@ -374,7 +376,8 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 st.success(f"Tìm thấy {len(rows)} kết quả.")
                 for r in rows:
                     with st.container(border=True):
-                        c1, c2, c3, c4 = st.columns([3.5, 3.5, 3.5, 2.5])
+                        # Giao diện hàng ngang thông minh
+                        c1, c2, c3, c4 = st.columns([3.5, 3, 3.5, 2.5])
                         msbhxh = str(r[0])
                         dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
                         cccd_raw = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else 'N/A'
