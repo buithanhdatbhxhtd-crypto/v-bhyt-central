@@ -135,7 +135,7 @@ def parse_bhxh_pdf(pdf_file):
         if match_ms:
             msbhxh = match_ms.group(1).strip()
             
-        # Tìm thời gian tổng cộng
+        # Tìm thời gian tổng cộng (Cả BHXH và BHTN)
         match_bhxh = re.search(r"Thời gian đóng BHXH vào quỹ hưu trí.*?là\s*(.*?)(?:\n|$)", full_text)
         match_bhtn = re.search(r"Thời gian đóng BHTN vào quỹ BHTN.*?là\s*(.*?)(?:\n|$)", full_text)
         
@@ -176,11 +176,15 @@ def save_bhxh_history(msbhxh, data, summary):
     if not conn: return False
     try:
         cur = conn.cursor()
+        # 1. Lưu chi tiết quá trình
         cur.execute("DELETE FROM bhxh_history WHERE ma_so_bhxh = %s", (msbhxh,))
         sql_hist = "INSERT INTO bhxh_history (ma_so_bhxh, tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh) VALUES %s"
         execute_values(cur, sql_hist, data)
+        
+        # 2. Cập nhật tổng thời gian vào bảng participants
         if summary:
             cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = %s WHERE ma_so_bhxh = %s", (summary, msbhxh))
+        
         conn.commit()
         return True
     except Exception:
@@ -297,6 +301,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
         if not conn: st.error("Lỗi kết nối CSDL"); st.stop()
         cur = conn.cursor()
         try:
+            # Lấy thêm cột tong_thoi_gian_bhxh
             fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
             where, params = "", {'limit': slimit, 'th': st.session_state.threshold}
             if stype == "Mã BHXH":
@@ -327,11 +332,13 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 for r in rows:
                     with st.container(border=True):
                         col_info, col_act = st.columns([3, 1])
+                        # Làm sạch dữ liệu NaN cho hiển thị
                         r_sdt = r[6] if r[6] and str(r[6]) != 'None' and str(r[6]) != 'nan' else 'Chưa có'
                         r_email = r[7] if r[7] and str(r[7]) != 'None' and str(r[7]) != 'nan' else 'Chưa có'
                         
                         with col_info:
                             st.subheader(f"👤 {r[2]}")
+                            # HIỂN THỊ TỔNG THỜI GIAN ĐÓNG NỔI BẬT
                             if r[9]:
                                 st.markdown(f"🏆 **Quá trình tham gia:** <span style='background-color:#E3F2FD; color:#1E88E5; padding:5px 12px; border-radius:15px; font-weight:bold; border: 1px solid #1E88E5;'>{r[9]}</span>", unsafe_allow_html=True)
                             else:
@@ -346,7 +353,9 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             st.write(f"📞 `{r_sdt}`")
                             st.write(f"📧 `{r_email}`")
 
+                        # --- EXPANDER XEM QUÁ TRÌNH ---
                         with st.expander(f"📜 Xem chi tiết lịch sử đóng BHXH của {r[2]}", expanded=False):
+                            # SỬA LỖI SẮP XẾP: Chuyển tu_thang sang kiểu Date để ORDER BY chính xác theo trình tự tăng dần
                             cur.execute("""
                                 SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh 
                                 FROM bhxh_history 
@@ -486,6 +495,18 @@ elif choice == "🗑️ Dọn dẹp":
                     conn.commit(); conn.close()
                     log_activity("DELETE_ALL_BHXH", {"status": "success"})
                     st.success("Đã dọn sạch dữ liệu BHXH!"); time.sleep(1); st.rerun()
+
+    # MỤC 3: XÓA NHẬT KÝ HOẠT ĐỘNG
+    with st.expander("📜 Dọn dẹp Nhật ký hệ thống", expanded=False):
+        st.warning("⚠️ Cảnh báo: Hành động này sẽ xóa sạch toàn bộ lịch sử thao tác của tất cả người dùng.")
+        if st.checkbox("Tôi xác nhận muốn xóa sạch nhật ký", key="chk_del_logs"):
+            if st.button("🔴 THỰC HIỆN XÓA NHẬT KÝ", key="btn_del_logs"):
+                conn = get_db_connection()
+                if conn:
+                    with conn.cursor() as cur:
+                        cur.execute("TRUNCATE TABLE audit_logs RESTART IDENTITY")
+                    conn.commit(); conn.close()
+                    st.success("Đã dọn sạch nhật ký hoạt động!"); time.sleep(1); st.rerun()
 
 elif choice == "⚙️ Tài khoản":
     st.header("⚙️ Tài khoản")
