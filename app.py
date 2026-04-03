@@ -217,24 +217,46 @@ def import_db_logic(df):
     for col in target:
         if col not in df.columns: df[col] = None
     
-    # Làm sạch dữ liệu và xử lý giá trị trống
+    # 1. Làm sạch dữ liệu và xử lý giá trị trống
     for col in ['ngay_sinh', 'han_the']:
         df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).apply(lambda x: x.date() if pd.notnull(x) else None)
     for col in ['ma_so_bhxh', 'ho_ten', 'cccd', 'sdt', 'email', 'dia_chi']:
         df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df[col] = df[col].where(~df[col].isin(['nan', 'None', 'NAT', 'NaT', '']), None)
     
-    # 💡 FIX LỖI: Loại bỏ trùng lặp ngay trong DataFrame trước khi đẩy lên SQL
+    # 2. Lấy dữ liệu hiện có từ DB để lọc trùng tuyệt đối (Fix UniqueViolation)
+    conn = get_db_connection()
+    if not conn: return
+    
+    existing_msbhxh = set()
+    existing_cccd = set()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ma_so_bhxh, cccd FROM participants")
+            for ms, cc in cur.fetchall():
+                if ms: existing_msbhxh.add(str(ms).strip())
+                if cc: existing_cccd.add(str(cc).strip())
+    finally:
+        conn.close()
+
+    # 3. Lọc trùng nội bộ file
     df = df.drop_duplicates(subset=['ma_so_bhxh'], keep='first')
-    # Chỉ lọc trùng CCCD nếu CCCD không phải NULL
-    cccd_valid = df[df['cccd'].notnull()]
-    cccd_invalid = df[df['cccd'].isnull()]
-    cccd_valid = cccd_valid.drop_duplicates(subset=['cccd'], keep='first')
-    df = pd.concat([cccd_valid, cccd_invalid])
+    valid_cccd = df[df['cccd'].notnull()].drop_duplicates(subset=['cccd'], keep='first')
+    df = pd.concat([valid_cccd, df[df['cccd'].isnull()]])
+
+    # 4. Lọc trùng với Database (Chỉ giữ lại người hoàn toàn mới)
+    df = df[~df['ma_so_bhxh'].isin(existing_msbhxh)]
+    # Lọc CCCD: Chỉ lọc những hàng có CCCD và CCCD đó đã tồn tại trong DB
+    if not df.empty:
+        df = df[~(df['cccd'].notnull() & df['cccd'].isin(existing_cccd))]
+
+    if df.empty:
+        st.warning("⚠️ Tất cả dữ liệu trong tệp này đều đã tồn tại trong hệ thống (trùng Mã BHXH hoặc CCCD).")
+        return
 
     data = list(df[target].itertuples(index=False, name=None))
     
-    # 💡 FIX LỖI UNIQUE VIOLATION: Sử dụng DO NOTHING để bỏ qua dòng trùng lặp
+    # 5. Thực hiện nạp dữ liệu
     sql = """
         INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
         VALUES %s 
@@ -456,6 +478,23 @@ elif choice == "📜 Nhật ký hệ thống":
             df_l['created_at'] = df_l['created_at'].dt.strftime('%H:%M:%S %d/%m/%Y')
             st.dataframe(df_l, use_container_width=True, hide_index=True)
         conn.close()
+
+elif choice == "👥 Quản lý nhân sự":
+    st.header("👥 Quản lý nhân sự")
+    target = st.text_input("Email nhân viên")
+    act = st.selectbox("Hành động", ["Đặt lại mật khẩu", "Xóa tài khoản"])
+    if st.button("🚀 Thực thi"):
+        if act == "Đặt lại mật khẩu":
+            pwd = st.text_input("Mật khẩu mới", type="password", key="np")
+            if pwd: s, m = admin_manage_user(target, "RESET_PWD", pwd)
+            st.info(m if 'm' in locals() else "Vui lòng nhập mật khẩu.")
+        else:
+            s, m = admin_manage_user(target, "DELETE"); st.info(m)
+
+elif choice == "🔧 Cấu hình":
+    st.header("🔧 Cấu hình")
+    st.session_state.threshold = st.slider("Độ nhạy tìm kiếm tên", 0.5, 0.95, st.session_state.threshold)
+    if st.button("Lưu"): st.success("Đã lưu cấu hình!")
 
 elif choice == "🗑️ Dọn dẹp":
     st.header("🗑️ Quản lý & Dọn dẹp kho dữ liệu")
