@@ -40,7 +40,7 @@ def get_db_connection():
 
 @st.cache_data(ttl=600)
 def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
-    """Hàm thực hiện tra cứu với tốc độ cao và làm sạch dữ liệu ngay lập tức"""
+    """Hàm thực hiện tra cứu với tốc độ cao bằng SQL trực tiếp và Cache"""
     conn = get_db_connection()
     if not conn: return []
     try:
@@ -69,7 +69,8 @@ def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
             elif sfilter == "Sắp hết hạn (30 ngày)": where += " AND han_the >= CURRENT_DATE AND han_the <= CURRENT_DATE + INTERVAL '30 days'"
             elif sfilter == "Còn hạn": where += " AND han_the >= CURRENT_DATE"
 
-            cur.execute(f"SELECT {fields} FROM participants WHERE {where} ORDER BY ho_ten ASC LIMIT %(limit)s", params)
+            query = f"SELECT {fields} FROM participants WHERE {where} ORDER BY ho_ten ASC LIMIT %(limit)s"
+            cur.execute(query, params)
             return cur.fetchall()
     except:
         return []
@@ -112,6 +113,8 @@ def admin_manage_user(target_email, action, new_password=None):
         return False, "Hành động không hợp lệ."
     except Exception as e: return False, f"Lỗi: {str(e)}"
 
+# --- 4. HÀM GHI NHẬT KÝ & THỐNG KÊ ---
+
 def log_activity(action, details_dict):
     if not st.session_state.user: return
     conn = get_db_connection()
@@ -143,7 +146,7 @@ def get_advanced_stats():
         return stats
     finally: conn.close()
 
-# --- 4. LOGIC XỬ LÝ DỮ LIỆU PDF ---
+# --- 5. LOGIC XỬ LÝ DỮ LIỆU PDF ---
 
 def parse_bhxh_pdf(pdf_file):
     """Trích xuất dữ liệu từ file PDF quá trình đóng BHXH (Mẫu 07/SBH) và lọc trùng"""
@@ -207,13 +210,13 @@ def import_db_logic(df):
         'ho ten': 'ho_ten', 
         'ngay sinh': 'ngay_sinh',
         'cccd': 'cccd', 
-        'socmnd': 'cccd',        # Khớp với socmnd trong hình
+        'socmnd': 'cccd',        
         'sdt': 'sdt', 
-        'sodienthoai': 'sdt',    # Khớp với soDienThoai trong hình
-        'diachilh': 'dia_chi',   # Khớp với diaChiLh trong hình
-        'hantheden': 'han_the',  # Khớp với hanTheDen trong hình
+        'sodienthoai': 'sdt',    
+        'diachilh': 'dia_chi',   
+        'hantheden': 'han_the',  
         'email': 'email',
-        'vss_email': 'email'     # Khớp với VSS_EMAIL trong hình
+        'vss_email': 'email'     
     }
     df = df.rename(columns=mapping)
     target = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'dia_chi', 'sdt', 'email', 'han_the']
@@ -258,7 +261,7 @@ def import_db_logic(df):
     finally:
         conn.close()
 
-# --- 5. GIAO DIỆN CHÍNH ---
+# --- 6. GIAO DIỆN CHÍNH ---
 
 if 'user' not in st.session_state: st.session_state.user = None
 if 'threshold' not in st.session_state: st.session_state.threshold = 0.85
@@ -365,7 +368,8 @@ elif choice == "🔍 Tra cứu & Quá trình":
                         cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (ms_sel,))
                         h_rows = cur.fetchall()
                         if h_rows:
-                            st.table(pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"]).style.format({"Mức đóng": "{:,.0f}đ"}))
+                            df_hist = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"])
+                            st.table(df_hist.style.format({"Mức đóng": "{:,.0f}đ"}))
                         else: st.warning("Chưa có lịch sử chi tiết.")
                     conn.close()
         else: st.warning("Không tìm thấy dữ liệu.")
