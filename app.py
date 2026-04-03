@@ -38,11 +38,11 @@ def get_db_connection():
 
 # --- 2. HÀM TRA CỨU TỐI ƯU HÓA (CACHED) ---
 
-@st.cache_data(ttl=300) # Lưu kết quả 5 phút để tránh truy vấn lặp lại
+@st.cache_data(ttl=300)
 def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
-    """Hàm thực hiện tra cứu với tốc độ cao bằng SQL trực tiếp"""
+    """Hàm thực hiện tra cứu với tốc độ cao và làm sạch dữ liệu ngay lập tức"""
     conn = get_db_connection()
-    if not conn: return []
+    if not conn: return pd.DataFrame()
     try:
         with conn.cursor() as cur:
             fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
@@ -70,8 +70,11 @@ def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
             elif sfilter == "Còn hạn": where += " AND han_the >= CURRENT_DATE"
 
             cur.execute(f"SELECT {fields} FROM participants WHERE {where} ORDER BY ho_ten ASC LIMIT %(limit)s", params)
-            return cur.fetchall()
-    except: return []
+            rows = cur.fetchall()
+            df = pd.DataFrame(rows, columns=fields.split(", "))
+            # Làm sạch dữ liệu: Chuyển NaN thành chuỗi rỗng
+            return df.fillna("")
+    except: return pd.DataFrame()
     finally: conn.close()
 
 # --- 3. LOGIC XÁC THỰC & QUẢN TRỊ ---
@@ -141,7 +144,7 @@ def get_advanced_stats():
         return stats
     finally: conn.close()
 
-# --- 4. LOGIC XỬ LÝ DỮ LIỆU ---
+# --- 4. LOGIC XỬ LÝ DỮ LIỆU PDF ---
 
 def parse_bhxh_pdf(pdf_file):
     history_data, seen_records = [], set()
@@ -192,6 +195,7 @@ def save_bhxh_history(msbhxh, data, summary):
     finally: conn.close()
 
 def import_db_logic(df):
+    """Nạp dữ liệu dùng bảng tạm để giải quyết triệt để lỗi UniqueViolation cho cả Mã BHXH và CCCD"""
     df.columns = [str(c).strip().lower() for c in df.columns]
     mapping = {'ma so bhxh': 'ma_so_bhxh', 'mã số bhxh': 'ma_so_bhxh', 'ho ten': 'ho_ten', 'ngay sinh': 'ngay_sinh',
                'cccd': 'cccd', 'sdt': 'sdt', 'diachilh': 'dia_chi', 'hantheden': 'han_the', 'email': 'email'}
@@ -205,21 +209,24 @@ def import_db_logic(df):
         df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df[col] = df[col].where(~df[col].isin(['nan', 'None', 'NAT', 'NaT', '']), None)
     df = df.drop_duplicates(subset=['ma_so_bhxh'], keep='first')
-    if 'cccd' in df.columns:
-        df_valid_cccd = df[df['cccd'].notnull()].drop_duplicates(subset=['cccd'], keep='first')
-        df = pd.concat([df_valid_cccd, df[df['cccd'].isnull()]])
     data = list(df[target].itertuples(index=False, name=None))
     if not data: return
     conn = get_db_connection()
     if not conn: return
     try:
         cur = conn.cursor()
+        # 1. Tạo bảng tạm để chứa dữ liệu mới
         cur.execute("""CREATE TEMP TABLE temp_import (ma_so_bhxh VARCHAR(15), ma_the_bhyt VARCHAR(15), ho_ten TEXT, 
                 ngay_sinh DATE, cccd VARCHAR(12), dia_chi TEXT, sdt VARCHAR(15), email TEXT, han_the DATE) ON COMMIT DROP;""")
         execute_values(cur, "INSERT INTO temp_import VALUES %s", data)
+        # 2. Chỉ nạp những người có mã BHXH VÀ CCCD chưa tồn tại trong hệ thống (Fix UniqueViolation)
         sql_insert = """INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
             SELECT t.ma_so_bhxh, t.ma_the_bhyt, t.ho_ten, t.ngay_sinh, t.cccd, t.dia_chi, t.sdt, t.email, t.han_the
-            FROM temp_import t WHERE NOT EXISTS (SELECT 1 FROM participants p WHERE p.ma_so_bhxh = t.ma_so_bhxh OR (t.cccd IS NOT NULL AND p.cccd = t.cccd));"""
+            FROM temp_import t WHERE NOT EXISTS (
+                SELECT 1 FROM participants p 
+                WHERE p.ma_so_bhxh = t.ma_so_bhxh 
+                OR (t.cccd IS NOT NULL AND p.cccd = t.cccd)
+            );"""
         cur.execute(sql_insert); conn.commit(); yield len(data)
     except Exception as e: conn.rollback(); st.error(f"Lỗi nạp dữ liệu: {e}")
     finally: conn.close()
@@ -288,65 +295,57 @@ elif choice == "🔍 Tra cứu & Quá trình":
             q_s = ""
 
     if st.button("🚀 Thực hiện tra cứu", use_container_width=True):
-        rows = perform_search(stype, q_m, q_s, sfilter, slimit, st.session_state.threshold)
-        log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(rows)})
+        df_res = perform_search(stype, q_m, q_s, sfilter, slimit, st.session_state.threshold)
+        log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(df_res)})
         
-        if rows:
-            st.success(f"Tìm thấy {len(rows)} kết quả.")
+        if not df_res.empty:
+            st.success(f"Tìm thấy {len(df_res)} kết quả.")
             
-            # --- TỐI ƯU SIÊU TỐC: DÙNG MỘT KHỐI HTML DUY NHẤT ---
-            html_results = """
-            <style>
-                .res-row { border-bottom: 1px solid #eee; padding: 12px 0; display: flex; align-items: center; font-family: sans-serif; }
-                .res-col-1 { flex: 3; }
-                .res-col-2 { flex: 3; color: #666; font-size: 0.9em; }
-                .res-col-3 { flex: 4; }
-                .res-name { font-weight: bold; color: #1E88E5; font-size: 1.1em; }
-                .res-meta { color: #555; font-size: 0.85em; margin-top: 4px; }
-                .res-tag { background: #e8f5e9; color: #2e7d32; padding: 2px 8px; border-radius: 12px; font-size: 0.85em; font-weight: bold; border: 1px solid #c8e6c9; }
-                .res-tag-none { background: #f5f5f5; color: #9e9e9e; padding: 2px 8px; border-radius: 12px; font-size: 0.85em; }
-            </style>
-            """
-            
-            for r in rows:
-                ms = str(r[0]); name = str(r[2])
-                dob = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
-                cccd = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else "N/A"
-                cccd_d = f"{cccd[:3]}***{cccd[-3:]}" if cccd != "N/A" and len(cccd) >= 6 else cccd
-                addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else "Chưa rõ địa chỉ"
-                sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan', ''] else "N/A"
-                qtr = f"<span class='res-tag'>📈 {r[9]}</span>" if r[9] else "<span class='res-tag-none'>💡 Chưa có quá trình</span>"
-                han = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else "N/A"
+            # --- FIX HIỂN THỊ HTML: DÙNG MỘT KHỐI RENDER AN TOÀN ---
+            html_rows = []
+            for _, r in df_res.iterrows():
+                ms = str(r['ma_so_bhxh']); name = str(r['ho_ten'])
+                dob = pd.to_datetime(r['ngay_sinh']).strftime('%d/%m/%Y') if r['ngay_sinh'] else "N/A"
+                cccd = str(r['cccd']); cccd_d = f"{cccd[:3]}***{cccd[-3:]}" if len(cccd) >= 6 else cccd
+                addr = str(r['dia_chi']); sdt = str(r['sdt'])
+                qtr = f"<span style='background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:12px;font-size:0.85em;font-weight:bold;'>📈 {r['tong_thoi_gian_bhxh']}</span>" if r['tong_thoi_gian_bhxh'] else "<span style='background:#f5f5f5;color:#9e9e9e;padding:2px 8px;border-radius:12px;font-size:0.85em;'>💡 Chưa có quá trình</span>"
+                han = pd.to_datetime(r['han_the']).strftime('%d/%m/%Y') if r['han_the'] else "N/A"
                 
-                html_results += f"""
-                <div class="res-row">
-                    <div class="res-col-1">
-                        <div class="res-name">{name}</div>
-                        <div class="res-meta">🆔 {ms} | 🎂 {dob} | 🪪 {cccd_d}</div>
+                html_rows.append(f"""
+                <div style="border-bottom: 1px solid #eee; padding: 12px 0; display: flex; align-items: center; font-family: sans-serif;">
+                    <div style="flex: 3.5;">
+                        <div style="font-weight: bold; color: #1E88E5; font-size: 1.1em;">{name}</div>
+                        <div style="color: #555; font-size: 0.85em; margin-top: 4px;">🆔 {ms} | 🎂 {dob} | 🪪 {cccd_d}</div>
                     </div>
-                    <div class="res-col-2">
+                    <div style="flex: 3; color: #666; font-size: 0.9em;">
                         📍 {addr}<br>📞 {sdt}
                     </div>
-                    <div class="res-col-3">
+                    <div style="flex: 3.5;">
                         {qtr}<br>
                         <small style='color:#888'>🏥 Hạn BHYT: {han}</small>
                     </div>
                 </div>
-                """
-            st.markdown(html_results, unsafe_allow_html=True)
+                """)
             
-            # --- CHI TIẾT QUÁ TRÌNH (TẢI THEO YÊU CẦU) ---
+            full_html = f"""
+            <div style="background: white; border-radius: 8px; padding: 10px;">
+                {''.join(html_rows)}
+            </div>
+            """
+            st.markdown(full_html, unsafe_allow_html=True)
+            
+            # --- CHI TIẾT QUÁ TRÌNH ---
             st.write("---")
             st.subheader("📜 Xem bảng chi tiết BHXH")
             selected_person = st.selectbox("Chọn người tham gia để xem lịch sử đóng đầy đủ:", 
-                                         options=[(r[0], r[2]) for r in rows],
-                                         format_func=lambda x: f"{x[1]} ({x[0]})")
+                                         options=df_res['ma_so_bhxh'].tolist(),
+                                         format_func=lambda x: f"{df_res[df_res['ma_so_bhxh']==x]['ho_ten'].values[0]} ({x})")
             
             if selected_person:
                 conn = get_db_connection()
                 if conn:
                     with conn.cursor() as cur:
-                        cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (selected_person[0],))
+                        cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (selected_person,))
                         h_rows = cur.fetchall()
                         if h_rows:
                             df_h = pd.DataFrame(h_rows, columns=["Từ", "Đến", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"])
