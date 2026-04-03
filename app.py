@@ -325,43 +325,50 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 st.success(f"Tìm thấy {len(rows)} kết quả.")
                 for r in rows:
                     with st.container(border=True):
-                        col_info, col_act = st.columns([3, 1])
-                        r_sdt = r[6] if r[6] and str(r[6]) != 'None' and str(r[6]) != 'nan' else 'Chưa có'
-                        r_email = r[7] if r[7] and str(r[7]) != 'None' and str(r[7]) != 'nan' else 'Chưa có'
+                        # --- CHỈNH SỬA GIAO DIỆN THEO DÒNG (DÒNG 221-255) ---
+                        c1, c2, c3, c4 = st.columns([2.5, 2.5, 3, 2])
                         
-                        with col_info:
-                            st.subheader(f"👤 {r[2]}")
+                        # Cột 1: Thông tin danh tính
+                        with c1:
+                            st.markdown(f"**{r[2]}**")
+                            st.caption(f"🆔 {r[0]} | 🪪 {str(r[4])[:3]}***{str(r[4])[-3:]}")
+                            st.caption(f"🎂 {pd.to_datetime(r[3]).strftime('%d/%m/%Y')}")
+                        
+                        # Cột 2: Địa chỉ & Liên hệ
+                        with c2:
+                            st.caption(f"📍 {r[5]}")
+                            r_sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan'] else 'Chưa có SĐT'
+                            st.markdown(f"📞 `{r_sdt}`")
+                        
+                        # Cột 3: Tổng quá trình (Hiện ở cuối dòng)
+                        with c3:
                             if r[9]:
-                                st.markdown(f"🏆 **Quá trình tham gia:** <span style='background-color:#E3F2FD; color:#1E88E5; padding:5px 12px; border-radius:15px; font-weight:bold; border: 1px solid #1E88E5;'>{r[9]}</span>", unsafe_allow_html=True)
+                                st.success(f"📈 {r[9]}")
                             else:
-                                st.caption("💡 Chưa có dữ liệu tổng quát. Hãy nạp file PDF quá trình để cập nhật.")
-                            st.write(f"📍 **Địa chỉ:** {r[5]}")
-                            st.write(f"🆔 **Mã BHXH:** `{r[0]}` | **CCCD:** `{str(r[4])[:3]}****{str(r[4])[-3:]}`")
-                            st.write(f"📅 **Ngày sinh:** {pd.to_datetime(r[3]).strftime('%d/%m/%Y')} | **Hạn BHYT:** {pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'}")
-                        
-                        with col_act:
-                            st.write("**Liên hệ:**")
-                            st.write(f"📞 `{r_sdt}`")
-                            st.write(f"📧 `{r_email}`")
+                                st.info("💡 Chưa nạp PDF quá trình")
+                            expiry_str = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'
+                            st.caption(f"🏥 Hạn thẻ BHYT: {expiry_str}")
 
-                        with st.expander(f"📜 Xem chi tiết lịch sử đóng BHXH của {r[2]}", expanded=False):
-                            cur.execute("""
-                                SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh 
-                                FROM bhxh_history 
-                                WHERE ma_so_bhxh = %s 
-                                ORDER BY to_date(tu_thang, 'MM/YYYY') ASC
-                            """, (r[0].strip(),))
-                            h_rows = cur.fetchall()
-                            if h_rows:
-                                df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
-                                def style_row(row):
-                                    color = 'color: #1a73e8; font-weight: bold;' if row['Loại'] == 'BHXH' else 'color: #5f6368;'
-                                    return [color] * len(row)
-                                st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}).apply(style_row, axis=1), 
-                                             use_container_width=True, hide_index=True)
-                                log_activity("VIEW_HISTORY", {"msbhxh": r[0]})
-                            else:
-                                st.warning("Chưa có dữ liệu bảng chi tiết. Vui lòng nạp file PDF (Mẫu 07/SBH) trong mục 'Nhập dữ liệu'.")
+                        # Cột 4: Nút tra cứu quá trình (Cuối dòng)
+                        with c4:
+                            with st.expander("📜 Tra cứu BHXH", expanded=False):
+                                cur.execute("""
+                                    SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh 
+                                    FROM bhxh_history 
+                                    WHERE ma_so_bhxh = %s 
+                                    ORDER BY to_date(tu_thang, 'MM/YYYY') ASC
+                                """, (r[0].strip(),))
+                                h_rows = cur.fetchall()
+                                if h_rows:
+                                    df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
+                                    def style_row(row):
+                                        color = 'color: #1a73e8; font-weight: bold;' if row['Loại'] == 'BHXH' else 'color: #5f6368;'
+                                        return [color] * len(row)
+                                    st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}).apply(style_row, axis=1), 
+                                                 use_container_width=True, hide_index=True)
+                                    log_activity("VIEW_HISTORY", {"msbhxh": r[0]})
+                                else:
+                                    st.warning("Vui lòng nạp PDF Mẫu 07/SBH.")
             else: st.warning("Không tìm thấy dữ liệu.")
         finally: conn.close()
 
@@ -453,23 +460,16 @@ elif choice == "🔧 Cấu hình":
 
 elif choice == "🗑️ Dọn dẹp":
     st.header("🗑️ Quản lý & Dọn dẹp kho dữ liệu")
-    
-    # MỤC 1: XÓA DỮ LIỆU BHYT
     with st.expander("📊 Dọn dẹp dữ liệu BHYT (Excel)", expanded=True):
-        st.warning("⚠️ Cảnh báo: Hành động này sẽ xóa sạch danh sách người tham gia BHYT đã nạp từ Excel.")
         if st.checkbox("Tôi xác nhận muốn xóa sạch dữ liệu BHYT", key="chk_del_bhyt"):
             if st.button("🔴 THỰC HIỆN XÓA DỮ LIỆU BHYT", key="btn_del_bhyt"):
                 conn = get_db_connection()
                 if conn:
-                    with conn.cursor() as cur:
-                        cur.execute("TRUNCATE TABLE participants RESTART IDENTITY")
+                    with conn.cursor() as cur: cur.execute("TRUNCATE TABLE participants RESTART IDENTITY")
                     conn.commit(); conn.close()
-                    log_activity("DELETE_ALL_BHYT", {"status": "success"})
-                    st.success("Đã dọn sạch dữ liệu BHYT!"); time.sleep(1); st.rerun()
+                    st.success("Đã dọn sạch!"); time.sleep(1); st.rerun()
 
-    # MỤC 2: XÓA DỮ LIỆU BHXH
     with st.expander("📜 Dọn dẹp dữ liệu BHXH (PDF)", expanded=True):
-        st.warning("⚠️ Cảnh báo: Hành động này sẽ xóa toàn bộ lịch sử đóng BHXH/BHTN và thông tin tổng quá trình của tất cả mọi người.")
         if st.checkbox("Tôi xác nhận muốn xóa sạch lịch sử BHXH", key="chk_del_bhxh"):
             if st.button("🔴 THỰC HIỆN XÓA LỊCH SỬ BHXH", key="btn_del_bhxh"):
                 conn = get_db_connection()
@@ -478,20 +478,16 @@ elif choice == "🗑️ Dọn dẹp":
                         cur.execute("TRUNCATE TABLE bhxh_history RESTART IDENTITY")
                         cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = NULL")
                     conn.commit(); conn.close()
-                    log_activity("DELETE_ALL_BHXH", {"status": "success"})
-                    st.success("Đã dọn sạch dữ liệu BHXH!"); time.sleep(1); st.rerun()
+                    st.success("Đã dọn sạch!"); time.sleep(1); st.rerun()
 
-    # MỤC 3: XÓA NHẬT KÝ HOẠT ĐỘNG
     with st.expander("📜 Dọn dẹp Nhật ký hệ thống", expanded=True):
-        st.warning("⚠️ Cảnh báo: Hành động này sẽ xóa sạch toàn bộ lịch sử thao tác của tất cả người dùng.")
         if st.checkbox("Tôi xác nhận muốn xóa sạch nhật ký", key="chk_del_logs"):
             if st.button("🔴 THỰC HIỆN XÓA NHẬT KÝ", key="btn_del_logs"):
                 conn = get_db_connection()
                 if conn:
-                    with conn.cursor() as cur:
-                        cur.execute("TRUNCATE TABLE audit_logs RESTART IDENTITY")
+                    with conn.cursor() as cur: cur.execute("TRUNCATE TABLE audit_logs RESTART IDENTITY")
                     conn.commit(); conn.close()
-                    st.success("Đã dọn sạch nhật ký hoạt động!"); time.sleep(1); st.rerun()
+                    st.success("Đã dọn sạch!"); time.sleep(1); st.rerun()
 
 elif choice == "⚙️ Tài khoản":
     st.header("⚙️ Tài khoản")
