@@ -308,41 +308,47 @@ elif choice == "🔍 Tra cứu & Quá trình":
         log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(rows)})
         
         if rows:
-            # --- HIỂN THỊ DẠNG BẢNG (X-LUC GIỐNG EXCEL - SIÊU TỐC) ---
+            # --- HIỂN THỊ DẠNG BẢNG (MÔ PHỎNG EXCEL - TỐI ƯU TỐC ĐỘ) ---
             df_display = pd.DataFrame(rows, columns=[
                 "Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", 
                 "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"
             ])
             
-            # Làm sạch dữ liệu hiển thị (Xóa NaN, None)
-            df_display = df_display.fillna("")
+            # --- LÀM SẠCH DỮ LIỆU HIỂN THỊ: LOẠI BỎ NaN, None, nan ---
+            def clean_display_data(x):
+                if pd.isna(x) or str(x).lower() in ['none', 'nan', 'nat', '']:
+                    return ""
+                return str(x)
+
             for col in df_display.columns:
-                df_display[col] = df_display[col].apply(lambda x: str(x) if x is not None and str(x).lower() != 'none' else "")
+                df_display[col] = df_display[col].apply(clean_display_data)
             
             # Che CCCD bảo mật
             def mask_cccd(val):
-                if val and len(str(val)) >= 6: return f"{str(val)[:3]}***{str(val)[-3:]}"
+                if val and len(val) >= 6: return f"{val[:3]}***{val[-3:]}"
                 return val
             df_display["CCCD"] = df_display["CCCD"].apply(mask_cccd)
             
-            # Định dạng ngày tháng
+            # Định dạng ngày tháng (chỉ nếu có dữ liệu)
             for date_col in ["Ngày sinh", "Hạn thẻ"]:
-                df_display[date_col] = pd.to_datetime(df_display[date_col], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
+                df_display[date_col] = pd.to_datetime(df_display[date_col], errors='coerce').dt.strftime('%d/%m/%Y')
+                df_display[date_col] = df_display[date_col].fillna("N/A")
 
             st.success(f"Tìm thấy {len(rows)} kết quả.")
             st.dataframe(df_display, use_container_width=True, hide_index=True)
             
-            # --- CHI TIẾT QUÁ TRÌNH THEO YÊU CẦU ---
+            # --- XEM CHI TIẾT THEO YÊU CẦU ---
             st.write("---")
-            st.subheader("📜 Tra cứu lịch sử BHXH chi tiết")
-            st.info("💡 Để xem quá trình đóng chi tiết, vui lòng chọn tên người tham gia dưới đây:")
+            st.subheader("📜 Xem quá trình BHXH chi tiết")
+            st.info("💡 Để xem bảng lịch sử chi tiết, vui lòng chọn một người từ danh sách kết quả phía trên:")
             
             # Tạo danh sách chọn từ kết quả tìm được
-            person_map = {f"{r[2]} ({r[0]})": r[0] for r in rows}
-            selected_label = st.selectbox("Chọn người tham gia:", options=["-- Chọn một người --"] + list(person_map.keys()))
+            options_list = [f"{r[2]} ({r[0]})" for r in rows]
+            selected_label = st.selectbox("Chọn người tham gia:", options=["-- Mời chọn người cần xem --"] + options_list)
             
-            if selected_label != "-- Chọn một người --":
-                ms_selected = person_map[selected_label]
+            if selected_label != "-- Mời chọn người cần xem --":
+                # Trích xuất mã số BHXH từ nhãn (phần trong ngoặc)
+                ms_selected = re.search(r"\((.*?)\)", selected_label).group(1)
                 conn = get_db_connection()
                 if conn:
                     with conn.cursor() as cur:
@@ -357,10 +363,10 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
                             st.table(df_h.style.format({"Mức đóng": "{:,.0f}đ"}))
                         else:
-                            st.warning("Người này chưa được nạp file PDF quá trình (Mẫu 07/SBH).")
+                            st.warning("Người này chưa có dữ liệu lịch sử chi tiết (file PDF).")
                     conn.close()
         else:
-            st.warning("Không tìm thấy dữ liệu.")
+            st.warning("Không tìm thấy dữ liệu phù hợp.")
 
 elif choice == "🧮 Tiện ích tính toán":
     st.header("🧮 Công cụ hỗ trợ thu BHYT & BHXH")
