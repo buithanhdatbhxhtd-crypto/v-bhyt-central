@@ -40,9 +40,12 @@ def get_db_connection():
 # --- 2. HÀM TIỆN ÍCH HIỂN THỊ KÈM COPY INLINE ---
 def st_copy_inline(label, text, is_bold=False, color="#31333F"):
     """Hiển thị nhãn + nội dung + nút copy trên cùng 1 dòng"""
+    if not text or str(text).lower() in ['none', 'nan', '']:
+        text = "N/A"
+    
     weight = "bold" if is_bold else "normal"
     html = f"""
-    <div style="display: flex; align-items: center; font-family: sans-serif; font-size: 14px; margin-bottom: 2px;">
+    <div style="display: flex; align-items: center; font-family: sans-serif; font-size: 13px; margin-bottom: 2px;">
         <span style="color: {color}; font-weight: {weight}; white-space: nowrap;">{label} {text}</span>
         <button onclick="copyToClipboard('{text}')" style="
             margin-left: 6px;
@@ -55,7 +58,7 @@ def st_copy_inline(label, text, is_bold=False, color="#31333F"):
             color: #1E88E5;
             height: 18px;
             line-height: 16px;
-            display: flex;
+            display: {'none' if text == 'N/A' else 'flex'};
             align-items: center;
         " title="Sao chép">📋</button>
     </div>
@@ -361,28 +364,29 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 st.success(f"Tìm thấy {len(rows)} kết quả.")
                 for r in rows:
                     with st.container(border=True):
-                        # --- GIAO DIỆN THEO DÒNG CÓ NÚT COPY INLINE ---
-                        c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
+                        # --- GIAO DIỆN THEO DÒNG TỐI ƯU (CẬP NHẬT: DÒNG 221-255) ---
+                        c1, c2, c3, c4 = st.columns([3.5, 2.5, 3.5, 2.5])
                         
-                        # Chuẩn bị dữ liệu
-                        full_name = r[2]
-                        msbhxh = r[0]
-                        dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y')
-                        cccd_masked = f"{str(r[4])[:3]}***{str(r[4])[-3:]}" if r[4] else "N/A"
+                        full_name = str(r[2])
+                        msbhxh = str(r[0])
+                        dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
+                        cccd_val = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else 'N/A'
                         
-                        # Cột 1: Danh tính (Họ tên & Mã số)
+                        # Cột 1: Danh tính quan trọng (Có Copy)
                         with c1:
                             st_copy_inline("", full_name, is_bold=True)
                             st_copy_inline("🆔", msbhxh)
                             st_copy_inline("🎂", dob_str)
+                            st_copy_inline("🪪", cccd_val)
                         
-                        # Cột 2: Địa chỉ & Liên hệ
+                        # Cột 2: Địa chỉ & Liên hệ (Làm sạch NaN)
                         with c2:
-                            st.caption(f"📍 {r[5]}")
-                            r_sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan'] else 'Chưa có SĐT'
+                            r_addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else 'Chưa có địa chỉ'
+                            r_sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan', ''] else 'Chưa có SĐT'
+                            st.caption(f"📍 {r_addr}")
                             st.markdown(f"📞 `{r_sdt}`")
                         
-                        # Cột 3: Trạng thái & Quá trình
+                        # Cột 3: Quá trình & Trạng thái BHYT
                         with c3:
                             if r[9]:
                                 st.success(f"📈 {r[9]}")
@@ -391,7 +395,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             expiry_str = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'
                             st.caption(f"🏥 Hạn BHYT: {expiry_str}")
 
-                        # Cột 4: Nút tra cứu quá trình
+                        # Cột 4: Nút tra cứu chi tiết
                         with c4:
                             with st.expander("📜 Tra cứu BHXH", expanded=False):
                                 cur.execute("""
