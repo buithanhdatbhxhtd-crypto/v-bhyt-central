@@ -23,7 +23,7 @@ st.set_page_config(
 @st.cache_resource
 def init_supabase():
     url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"] # Service Role Key
+    key = st.secrets["SUPABASE_KEY"] # Phải là Service Role Key
     return create_client(url, key)
 
 supabase: Client = init_supabase()
@@ -146,7 +146,7 @@ def get_advanced_stats():
         return stats
     finally: conn.close()
 
-# --- 5. LOGIC XỬ LÝ DỮ LIỆU PDF ---
+# --- 5. LOGIC XỬ LÝ DỮ LIỆU ---
 
 def parse_bhxh_pdf(pdf_file):
     """Trích xuất dữ liệu từ file PDF quá trình đóng BHXH (Mẫu 07/SBH) và lọc trùng"""
@@ -198,56 +198,82 @@ def save_bhxh_history(msbhxh, data, summary):
     finally: conn.close()
 
 def import_db_logic(df):
-    """Nạp dữ liệu an toàn dùng bảng tạm để tránh lỗi UniqueViolation và sửa lỗi ánh xạ tiêu đề"""
+    """Nạp dữ liệu dùng bảng tạm để tránh lỗi UniqueViolation và cải thiện Mapping"""
     df.columns = [str(c).strip().lower() for c in df.columns]
-    # Cập nhật mapping để nhận diện tiêu đề từ file Excel của người dùng
+    
+    # Mapping toàn diện để tránh sót cột dữ liệu
     mapping = {
         'ma so bhxh': 'ma_so_bhxh', 
-        'mã số bhxh': 'ma_so_bhxh', 
+        'mã số bhxh': 'ma_so_bhxh',
+        'ma the bhyt': 'ma_the_bhyt',
+        'mã thẻ bhyt': 'ma_the_bhyt',
         'ho ten': 'ho_ten', 
         'ngay sinh': 'ngay_sinh',
         'cccd': 'cccd', 
-        'socmnd': 'cccd',       # Ánh xạ từ file Excel của bạn
+        'socmnd': 'cccd',
         'sdt': 'sdt', 
-        'sodienthoai': 'sdt',   # Ánh xạ từ file Excel của bạn (fix lỗi không hiện SĐT)
+        'sodienthoai': 'sdt',
         'diachilh': 'dia_chi', 
         'hantheden': 'han_the', 
         'email': 'email',
-        'vss_email': 'email'    # Ánh xạ email từ file Excel của bạn
+        'vss_email': 'email'
     }
     df = df.rename(columns=mapping)
+    
+    # Các trường mục tiêu trong Database
     target = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'dia_chi', 'sdt', 'email', 'han_the']
     for col in target:
         if col not in df.columns: df[col] = None
     
+    # Chuẩn hóa định dạng
     for col in ['ngay_sinh', 'han_the']:
         df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).apply(lambda x: x.date() if pd.notnull(x) else None)
-    for col in ['ma_so_bhxh', 'ho_ten', 'cccd', 'sdt', 'email', 'dia_chi']:
+    
+    for col in ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'email', 'dia_chi']:
         df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df[col] = df[col].where(~df[col].isin(['nan', 'None', 'NAT', 'NaT', '']), None)
     
+    # Lọc trùng trong nội bộ file Excel
     df = df.drop_duplicates(subset=['ma_so_bhxh'], keep='first')
     data = list(df[target].itertuples(index=False, name=None))
+    
     if not data: return
 
     conn = get_db_connection()
     if not conn: return
+    
     try:
         cur = conn.cursor()
-        cur.execute("""CREATE TEMP TABLE temp_import (ma_so_bhxh VARCHAR(15), ma_the_bhyt VARCHAR(15), ho_ten TEXT, 
-                ngay_sinh DATE, cccd VARCHAR(12), dia_chi TEXT, sdt VARCHAR(15), email TEXT, han_the DATE) ON COMMIT DROP;""")
+        # 1. Tạo bảng tạm
+        cur.execute("""CREATE TEMP TABLE temp_import (
+            ma_so_bhxh VARCHAR(15), ma_the_bhyt VARCHAR(15), ho_ten TEXT, 
+            ngay_sinh DATE, cccd VARCHAR(12), dia_chi TEXT, 
+            sdt VARCHAR(15), email TEXT, han_the DATE
+        ) ON COMMIT DROP;""")
+        
+        # 2. Đẩy dữ liệu vào bảng tạm theo lô
         execute_values(cur, "INSERT INTO temp_import VALUES %s", data)
-        # Chỉ nạp những người có mã BHXH và CCCD chưa tồn tại
-        sql_insert = """INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
+        
+        # 3. Nạp vào bảng chính (Chỉ nạp những người chưa có Mã BHXH hoặc CCCD)
+        sql_insert = """
+            INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
             SELECT t.ma_so_bhxh, t.ma_the_bhyt, t.ho_ten, t.ngay_sinh, t.cccd, t.dia_chi, t.sdt, t.email, t.han_the
-            FROM temp_import t WHERE NOT EXISTS (
+            FROM temp_import t 
+            WHERE NOT EXISTS (
                 SELECT 1 FROM participants p 
                 WHERE p.ma_so_bhxh = t.ma_so_bhxh 
                 OR (t.cccd IS NOT NULL AND p.cccd = t.cccd)
-            );"""
-        cur.execute(sql_insert); conn.commit(); yield len(data)
-    except Exception as e: conn.rollback(); st.error(f"Lỗi nạp dữ liệu: {e}")
-    finally: conn.close()
+            );
+        """
+        cur.execute(sql_insert)
+        affected_rows = cur.rowcount
+        conn.commit()
+        yield affected_rows
+    except Exception as e: 
+        conn.rollback()
+        st.error(f"Lỗi nạp dữ liệu: {e}")
+    finally: 
+        conn.close()
 
 # --- 6. GIAO DIỆN CHÍNH ---
 
@@ -269,7 +295,7 @@ if st.session_state.user is None:
                         log_activity("LOGIN", {"status": "success"}); st.rerun()
     st.stop()
 
-# --- SIDEBAR ---
+# --- SIDEBAR (LIỆT KÊ TRỰC TIẾP) ---
 st.sidebar.title("🛡️ V-BHYT PRO")
 st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
@@ -321,40 +347,33 @@ elif choice == "🔍 Tra cứu & Quá trình":
         log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(rows)})
         
         if rows:
-            # --- HIỂN THỊ DẠNG BẢNG (MÔ PHỎNG EXCEL - TỐI ƯU TỐC ĐỘ) ---
+            # HIỂN THỊ DẠNG BẢNG (EXCEL STYLE)
             df_display = pd.DataFrame(rows, columns=[
                 "Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", 
                 "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"
             ])
             
-            # --- LÀM SẠCH DỮ LIỆU HIỂN THỊ: LOẠI BỎ NaN, None, nan ---
+            # Làm sạch dữ liệu hiển thị
             def clean_display_data(x):
-                if pd.isna(x) or str(x).lower() in ['none', 'nan', 'nat', '']:
-                    return ""
+                if pd.isna(x) or str(x).lower() in ['none', 'nan', 'nat', '']: return ""
                 return str(x)
 
             for col in df_display.columns:
                 df_display[col] = df_display[col].apply(clean_display_data)
             
             # Che CCCD bảo mật
-            def mask_cccd(val):
-                if val and len(val) >= 6: return f"{val[:3]}***{val[-3:]}"
-                return val
-            df_display["CCCD"] = df_display["CCCD"].apply(mask_cccd)
+            df_display["CCCD"] = df_display["CCCD"].apply(lambda x: f"{x[:3]}***{x[-3:]}" if len(x) >= 6 else x)
             
             # Định dạng ngày tháng
             for date_col in ["Ngày sinh", "Hạn thẻ"]:
-                df_display[date_col] = pd.to_datetime(df_display[date_col], errors='coerce').dt.strftime('%d/%m/%Y')
-                df_display[date_col] = df_display[date_col].fillna("N/A")
+                df_display[date_col] = pd.to_datetime(df_display[date_col], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
 
             st.success(f"Tìm thấy {len(rows)} kết quả.")
             st.dataframe(df_display, use_container_width=True, hide_index=True)
             
-            # --- XEM CHI TIẾT THEO YÊU CẦU ---
+            # XEM CHI TIẾT THEO YÊU CẦU
             st.write("---")
             st.subheader("📜 Xem quá trình BHXH chi tiết")
-            st.info("💡 Để xem bảng lịch sử chi tiết, vui lòng chọn một người từ danh sách kết quả phía trên:")
-            
             options_list = [f"{r[2]} ({r[0]})" for r in rows]
             selected_label = st.selectbox("Chọn người tham gia:", options=["-- Mời chọn người cần xem --"] + options_list)
             
@@ -374,7 +393,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
                             df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
                             st.table(df_h.style.format({"Mức đóng": "{:,.0f}đ"}))
                         else:
-                            st.warning("Người này chưa có dữ liệu lịch sử chi tiết (file PDF).")
+                            st.warning("Người này chưa có dữ liệu lịch sử chi tiết.")
                     conn.close()
         else:
             st.warning("Không tìm thấy dữ liệu phù hợp.")
@@ -408,17 +427,30 @@ elif choice == "📥 Nhập dữ liệu":
     with tx:
         f = st.file_uploader("Chọn file Excel", type=["xlsx", "xlsb"])
         if f and st.button("🚀 Bắt đầu nạp BHYT"):
-            df = pd.read_excel(f, dtype=str); pb, txt = st.progress(0), st.empty()
-            processed = 0
-            for count in import_db_logic(df): processed += count; pb.progress(1.0); txt.text(f"Đã xử lý xong {processed:,} hàng.")
-            st.cache_data.clear(); st.success("Xong!"); log_activity("IMPORT_EXCEL", {"rows": len(df)})
+            # XỬ LÝ FILE XLSB CHUYÊN DỤNG
+            engine = 'pyxlsb' if f.name.endswith('.xlsb') else 'openpyxl'
+            try:
+                df = pd.read_excel(f, dtype=str, engine=engine)
+                pb, txt = st.progress(0), st.empty()
+                processed = 0
+                for count in import_db_logic(df): 
+                    processed += count
+                    pb.progress(1.0)
+                    txt.text(f"Đã xử lý xong {processed:,} hàng.")
+                st.cache_data.clear()
+                st.success(f"Đã hoàn thành! Đã nạp thành công {processed:,} bản ghi mới.")
+                log_activity("IMPORT_EXCEL", {"rows": len(df)})
+            except Exception as e:
+                st.error(f"Lỗi khi đọc file Excel: {e}")
+
     with tp:
         pdf_f = st.file_uploader("Chọn file PDF (Mẫu 07/SBH)", type=["pdf"])
         if pdf_f and st.button("🔍 Phân tích và Lưu quá trình"):
             with st.spinner("Đang đọc PDF..."):
                 ms, data, summary = parse_bhxh_pdf(pdf_f)
                 if ms and data and save_bhxh_history(ms, data, summary):
-                    st.cache_data.clear(); st.success(f"✅ Thành công Mã số: {ms}")
+                    st.cache_data.clear()
+                    st.success(f"✅ Thành công Mã số: {ms}")
                     log_activity("IMPORT_PDF", {"ms": ms, "rows": len(data)})
                 else: st.error("Lỗi hoặc không tìm thấy dữ liệu.")
 
