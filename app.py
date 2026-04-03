@@ -11,6 +11,7 @@ import json
 import plotly.express as px
 import pdfplumber
 import re
+import streamlit.components.v1 as components
 
 # --- 1. CẤU HÌNH & KHỞI TẠO ---
 st.set_page_config(
@@ -36,7 +37,39 @@ def get_db_connection():
     except Exception:
         return None
 
-# --- 2. LOGIC XÁC THỰC & QUẢN TRỊ ---
+# --- 2. HÀM TIỆN ÍCH COPY NHANH ---
+def st_copy_button(text):
+    """Tạo một nút copy nhỏ gọn bằng HTML/JS"""
+    copy_html = f"""
+        <div style="display: inline-block; margin-left: 5px;">
+            <button onclick="copyToClipboard('{text}')" style="
+                padding: 2px 8px;
+                font-size: 11px;
+                cursor: pointer;
+                border-radius: 4px;
+                border: 1px solid #ddd;
+                background: #f8f9fa;
+                color: #1E88E5;
+                font-weight: bold;
+                transition: 0.3s;
+            " onmouseover="this.style.background='#e3f2fd'" onmouseout="this.style.background='#f8f9fa'">
+                📋 Copy
+            </button>
+        </div>
+        <script>
+        function copyToClipboard(text) {{
+            const el = document.createElement('textarea');
+            el.value = text;
+            document.body.appendChild(el);
+            el.select();
+            document.execCommand('copy');
+            document.body.removeChild(el);
+        }}
+        </script>
+    """
+    components.html(copy_html, height=28)
+
+# --- 3. LOGIC XÁC THỰC & QUẢN TRỊ ---
 
 def login_user(email, password):
     try:
@@ -79,7 +112,7 @@ def admin_manage_user(target_email, action, new_password=None):
     except Exception as e:
         return False, f"Lỗi: {str(e)}"
 
-# --- 3. HÀM GHI NHẬT KÝ & THỐNG KÊ ---
+# --- 4. HÀM GHI NHẬT KÝ & THỐNG KÊ ---
 
 def log_activity(action, details_dict):
     """Ghi nhận mọi thao tác vào bảng audit_logs"""
@@ -118,7 +151,7 @@ def get_advanced_stats():
         return stats
     finally: conn.close()
 
-# --- 4. LOGIC XỬ LÝ DỮ LIỆU PDF ---
+# --- 5. LOGIC XỬ LÝ DỮ LIỆU PDF ---
 
 def parse_bhxh_pdf(pdf_file):
     """Trích xuất dữ liệu từ file PDF quá trình đóng BHXH (Mẫu 07/SBH) và lọc trùng"""
@@ -217,7 +250,7 @@ def import_db_logic(df):
         conn.close()
         yield min(i + 5000, len(data))
 
-# --- 5. GIAO DIỆN CHÍNH ---
+# --- 6. GIAO DIỆN CHÍNH ---
 
 if 'user' not in st.session_state: st.session_state.user = None
 if 'threshold' not in st.session_state: st.session_state.threshold = 0.85
@@ -325,14 +358,24 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 st.success(f"Tìm thấy {len(rows)} kết quả.")
                 for r in rows:
                     with st.container(border=True):
-                        # --- CHỈNH SỬA GIAO DIỆN THEO DÒNG (DÒNG 221-255) ---
-                        c1, c2, c3, c4 = st.columns([2.5, 2.5, 3, 2])
+                        # --- CHỈNH SỬA GIAO DIỆN THEO DÒNG CÓ NÚT COPY ---
+                        c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
                         
-                        # Cột 1: Thông tin danh tính
+                        # Chuẩn bị dữ liệu để copy
+                        full_name = r[2]
+                        msbhxh = r[0]
+                        dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y')
+                        
+                        # Cột 1: Thông tin danh tính + Nút copy
                         with c1:
-                            st.markdown(f"**{r[2]}**")
-                            st.caption(f"🆔 {r[0]} | 🪪 {str(r[4])[:3]}***{str(r[4])[-3:]}")
-                            st.caption(f"🎂 {pd.to_datetime(r[3]).strftime('%d/%m/%Y')}")
+                            st.write(f"**{full_name}**")
+                            st_copy_button(full_name)
+                            
+                            st.caption(f"🆔 {msbhxh}")
+                            st_copy_button(msbhxh)
+                            
+                            st.caption(f"🎂 {dob_str}")
+                            st_copy_button(dob_str)
                         
                         # Cột 2: Địa chỉ & Liên hệ
                         with c2:
@@ -460,15 +503,20 @@ elif choice == "🔧 Cấu hình":
 
 elif choice == "🗑️ Dọn dẹp":
     st.header("🗑️ Quản lý & Dọn dẹp kho dữ liệu")
+    
+    # MỤC 1: XÓA DỮ LIỆU BHYT
     with st.expander("📊 Dọn dẹp dữ liệu BHYT (Excel)", expanded=True):
         if st.checkbox("Tôi xác nhận muốn xóa sạch dữ liệu BHYT", key="chk_del_bhyt"):
             if st.button("🔴 THỰC HIỆN XÓA DỮ LIỆU BHYT", key="btn_del_bhyt"):
                 conn = get_db_connection()
                 if conn:
-                    with conn.cursor() as cur: cur.execute("TRUNCATE TABLE participants RESTART IDENTITY")
+                    with conn.cursor() as cur:
+                        cur.execute("TRUNCATE TABLE participants RESTART IDENTITY")
                     conn.commit(); conn.close()
-                    st.success("Đã dọn sạch!"); time.sleep(1); st.rerun()
+                    log_activity("DELETE_ALL_BHYT", {"status": "success"})
+                    st.success("Đã dọn sạch dữ liệu BHYT!"); time.sleep(1); st.rerun()
 
+    # MỤC 2: XÓA DỮ LIỆU BHXH
     with st.expander("📜 Dọn dẹp dữ liệu BHXH (PDF)", expanded=True):
         if st.checkbox("Tôi xác nhận muốn xóa sạch lịch sử BHXH", key="chk_del_bhxh"):
             if st.button("🔴 THỰC HIỆN XÓA LỊCH SỬ BHXH", key="btn_del_bhxh"):
@@ -478,16 +526,19 @@ elif choice == "🗑️ Dọn dẹp":
                         cur.execute("TRUNCATE TABLE bhxh_history RESTART IDENTITY")
                         cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = NULL")
                     conn.commit(); conn.close()
-                    st.success("Đã dọn sạch!"); time.sleep(1); st.rerun()
+                    log_activity("DELETE_ALL_BHXH", {"status": "success"})
+                    st.success("Đã dọn sạch dữ liệu BHXH!"); time.sleep(1); st.rerun()
 
+    # MỤC 3: XÓA NHẬT KÝ HOẠT ĐỘNG
     with st.expander("📜 Dọn dẹp Nhật ký hệ thống", expanded=True):
         if st.checkbox("Tôi xác nhận muốn xóa sạch nhật ký", key="chk_del_logs"):
             if st.button("🔴 THỰC HIỆN XÓA NHẬT KÝ", key="btn_del_logs"):
                 conn = get_db_connection()
                 if conn:
-                    with conn.cursor() as cur: cur.execute("TRUNCATE TABLE audit_logs RESTART IDENTITY")
+                    with conn.cursor() as cur:
+                        cur.execute("TRUNCATE TABLE audit_logs RESTART IDENTITY")
                     conn.commit(); conn.close()
-                    st.success("Đã dọn sạch!"); time.sleep(1); st.rerun()
+                    st.success("Đã dọn sạch nhật ký hoạt động!"); time.sleep(1); st.rerun()
 
 elif choice == "⚙️ Tài khoản":
     st.header("⚙️ Tài khoản")
