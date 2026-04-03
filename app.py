@@ -99,19 +99,22 @@ def is_admin():
 
 def admin_manage_user(target_email, action, new_password=None):
     try:
+        # Khởi tạo admin client riêng để đảm bảo quyền hạn
         admin_client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
         response = admin_client.auth.admin.list_users()
         all_users = response.users if hasattr(response, 'users') else response
         user = next((u for u in all_users if u.email == target_email), None)
-        if not user: return False, "Không tìm thấy người dùng."
+        
+        if not user: return False, "Không tìm thấy người dùng có email này."
+        
         if action == "RESET_PWD":
             admin_client.auth.admin.update_user_by_id(user.id, {"password": new_password})
-            return True, f"Đã đổi mật khẩu cho {target_email}."
+            return True, f"Đã đổi mật khẩu thành công cho {target_email}."
         elif action == "DELETE":
             admin_client.auth.admin.delete_user(user.id)
-            return True, f"Đã xóa tài khoản {target_email}."
+            return True, f"Đã xóa tài khoản {target_email} khỏi hệ thống."
         return False, "Hành động không hợp lệ."
-    except Exception as e: return False, f"Lỗi: {str(e)}"
+    except Exception as e: return False, f"Lỗi quản trị: {str(e)}"
 
 # --- 4. HÀM GHI NHẬT KÝ & THỐNG KÊ ---
 
@@ -280,10 +283,10 @@ if st.session_state.user is None:
                         log_activity("LOGIN", {"status": "success"}); st.rerun()
     st.stop()
 
-# --- SIDEBAR (RADIO MENU) ---
+# --- SIDEBAR ---
 st.sidebar.title("🛡️ V-BHYT PRO")
 st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
-role_label = " Quản trị viên" if is_admin() else " Nhân viên Tra cứu"
+role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
 st.sidebar.caption(role_label)
 
 menu_options = ["📊 Dashboard", "🔍 Tra cứu & Quá trình", "🧮 Tiện ích tính toán", "⚙️ Tài khoản"]
@@ -331,33 +334,22 @@ elif choice == "🔍 Tra cứu & Quá trình":
         st.session_state.search_results = perform_search(stype, q_m, q_s, sfilter, slimit, st.session_state.threshold)
         log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(st.session_state.search_results)})
 
-    # HIỂN THỊ KẾT QUẢ
     if st.session_state.search_results:
         rows = st.session_state.search_results
-        df_display = pd.DataFrame(rows, columns=[
-            "Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", 
-            "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"
-        ])
-        
+        df_display = pd.DataFrame(rows, columns=["Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"])
         def clean_fmt(x):
             if pd.isna(x) or str(x).lower() in ['none', 'nan', 'nat', '']: return ""
             return str(x)
-        for col in df_display.columns:
-            df_display[col] = df_display[col].apply(clean_fmt)
-        
+        for col in df_display.columns: df_display[col] = df_display[col].apply(clean_fmt)
         df_display["CCCD"] = df_display["CCCD"].apply(lambda x: f"{x[:3]}***{x[-3:]}" if len(x) >= 6 else x)
         for d_col in ["Ngày sinh", "Hạn thẻ"]:
             df_display[d_col] = pd.to_datetime(df_display[d_col], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
-
         st.success(f"Tìm thấy {len(rows)} kết quả.")
         st.dataframe(df_display, use_container_width=True, hide_index=True)
-        
-        # Xem chi tiết quá trình
         st.write("---")
         st.subheader("📜 Xem quá trình BHXH chi tiết")
         options = [f"{r[2]} ({r[0]})" for r in rows]
         sel = st.selectbox("Chọn người tham gia cần xem lịch sử:", options=["-- Mời chọn --"] + options, key="selected_bhxh_person")
-        
         if sel != "-- Mời chọn --":
             ms_sel = re.search(r"\((.*?)\)", sel).group(1)
             conn = get_db_connection()
@@ -368,11 +360,53 @@ elif choice == "🔍 Tra cứu & Quá trình":
                     if h_rows:
                         st.table(pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"]).style.format({"Mức đóng": "{:,.0f}đ"}))
                         log_activity("VIEW_DETAIL", {"msbhxh": ms_sel})
-                    else: 
-                        st.warning("Chưa có lịch sử chi tiết (file PDF).")
+                    else: st.warning("Chưa có lịch sử chi tiết.")
                 conn.close()
     elif st.session_state.search_results == []:
         st.warning("Không tìm thấy dữ liệu phù hợp.")
+
+elif choice == "👥 Quản lý nhân sự":
+    st.header("👥 Quản lý nhân sự & Phân quyền")
+    tab_manage, tab_add = st.tabs(["🔧 Xử lý tài khoản", "➕ Thêm nhân viên mới"])
+    
+    with tab_manage:
+        target_email = st.text_input("Nhập chính xác Email nhân viên")
+        act_type = st.selectbox("Hành động", ["Đặt lại mật khẩu", "Xóa tài khoản"])
+        
+        if act_type == "Đặt lại mật khẩu":
+            new_p = st.text_input("Nhập mật khẩu mới cho nhân viên", type="password")
+            if st.button("🚀 Thực thi đổi mật khẩu"):
+                if target_email and new_p:
+                    s, m = admin_manage_user(target_email, "RESET_PWD", new_p)
+                    if s: st.success(m); log_activity("ADMIN_RESET_PWD", {"target": target_email})
+                    else: st.error(m)
+                else: st.warning("Vui lòng điền đầy đủ email và mật khẩu mới.")
+        else:
+            if st.button("🔴 Xác nhận XÓA tài khoản"):
+                if target_email:
+                    s, m = admin_manage_user(target_email, "DELETE")
+                    if s: st.success(m); log_activity("ADMIN_DELETE_USER", {"target": target_email})
+                    else: st.error(m)
+                else: st.warning("Vui lòng nhập email cần xóa.")
+                
+    with tab_add:
+        with st.form("add_user_form"):
+            st.subheader("Tạo tài khoản công vụ mới")
+            n_email = st.text_input("Email nhân viên (ví dụ: nhanvien@vbhyt.vn)")
+            n_pwd = st.text_input("Mật khẩu tạm thời (ít nhất 6 ký tự)", type="password")
+            if st.form_submit_button("Tạo tài khoản"):
+                if n_email and len(n_pwd) >= 6:
+                    try:
+                        admin_client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+                        admin_client.auth.admin.create_user({
+                            "email": n_email,
+                            "password": n_pwd,
+                            "email_confirm": True
+                        })
+                        st.success(f"✅ Đã tạo thành công tài khoản cho: {n_email}")
+                        log_activity("ADMIN_CREATE_USER", {"target": n_email})
+                    except Exception as e: st.error(f"Lỗi: {e}")
+                else: st.warning("Vui lòng kiểm tra lại email và độ dài mật khẩu.")
 
 elif choice == "🧮 Tiện ích tính toán":
     st.header("🧮 Công cụ hỗ trợ thu BHYT & BHXH")
