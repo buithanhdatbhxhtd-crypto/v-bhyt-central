@@ -223,6 +223,7 @@ def import_db_logic(df):
     for col in target:
         if col not in df.columns: df[col] = None
     
+    # Làm sạch NaN
     for col in ['ngay_sinh', 'han_the']:
         df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).apply(lambda x: x.date() if pd.notnull(x) else None)
     
@@ -282,7 +283,7 @@ if st.session_state.user is None:
 # --- SIDEBAR (RADIO MENU) ---
 st.sidebar.title("🛡️ V-BHYT PRO")
 st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
-role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
+role_label = " Quản trị viên" if is_admin() else " Nhân viên Tra cứu"
 st.sidebar.caption(role_label)
 
 menu_options = ["📊 Dashboard", "🔍 Tra cứu & Quá trình", "🧮 Tiện ích tính toán", "⚙️ Tài khoản"]
@@ -330,11 +331,9 @@ elif choice == "🔍 Tra cứu & Quá trình":
         st.session_state.search_results = perform_search(stype, q_m, q_s, sfilter, slimit, st.session_state.threshold)
         log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(st.session_state.search_results)})
 
-    # --- HIỂN THỊ KẾT QUẢ TỪ SESSION STATE ---
+    # HIỂN THỊ KẾT QUẢ
     if st.session_state.search_results:
         rows = st.session_state.search_results
-        
-        # 1. Hiển thị dạng bảng
         df_display = pd.DataFrame(rows, columns=[
             "Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", 
             "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"
@@ -353,12 +352,10 @@ elif choice == "🔍 Tra cứu & Quá trình":
         st.success(f"Tìm thấy {len(rows)} kết quả.")
         st.dataframe(df_display, use_container_width=True, hide_index=True)
         
-        # 2. Xem chi tiết quá trình (Cố định dưới bảng kết quả)
+        # Xem chi tiết quá trình
         st.write("---")
         st.subheader("📜 Xem quá trình BHXH chi tiết")
         options = [f"{r[2]} ({r[0]})" for r in rows]
-        
-        # Dùng key để Streamlit quản lý trạng thái selectbox độc lập
         sel = st.selectbox("Chọn người tham gia cần xem lịch sử:", options=["-- Mời chọn --"] + options, key="selected_bhxh_person")
         
         if sel != "-- Mời chọn --":
@@ -372,7 +369,7 @@ elif choice == "🔍 Tra cứu & Quá trình":
                         st.table(pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"]).style.format({"Mức đóng": "{:,.0f}đ"}))
                         log_activity("VIEW_DETAIL", {"msbhxh": ms_sel})
                     else: 
-                        st.warning("Hệ thống chưa có lịch sử chi tiết cho mã số này. Vui lòng nạp file PDF Mẫu 07/SBH.")
+                        st.warning("Chưa có lịch sử chi tiết (file PDF).")
                 conn.close()
     elif st.session_state.search_results == []:
         st.warning("Không tìm thấy dữ liệu phù hợp.")
