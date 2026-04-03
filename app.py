@@ -11,6 +11,7 @@ import json
 import plotly.express as px
 import pdfplumber
 import re
+import streamlit.components.v1 as components
 
 # --- 1. CẤU HÌNH & KHỞI TẠO ---
 st.set_page_config(
@@ -36,13 +37,59 @@ def get_db_connection():
     except Exception:
         return None
 
-# --- 2. HÀM TRA CỨU TỐI ƯU HÓA (CACHED) ---
+# --- 2. HÀM HIỂN THỊ KHỐI DANH TÍNH TỐI ƯU (GIẢM TẢI HIỂN THỊ) ---
+def render_identity_block(full_name, msbhxh, dob, cccd_raw, cccd_display):
+    """Hiển thị toàn bộ thông tin định danh và nút copy trong 01 khung duy nhất để tăng tốc độ"""
+    
+    def clean(val): return val if val and str(val).lower() not in ['none', 'nan', ''] else "N/A"
+    
+    name = clean(full_name)
+    ms = clean(msbhxh)
+    d = clean(dob)
+    cccd = clean(cccd_raw)
+    cccd_d = clean(cccd_display)
 
-@st.cache_data(ttl=300)
+    # JS Code dùng chung cho tất cả các nút trong block
+    html = f"""
+    <body style="margin: 0; padding: 0; overflow: hidden; background: transparent; font-family: sans-serif;">
+        <style>
+            .row {{ display: flex; align-items: center; height: 26px; font-size: 13px; color: #31333F; }}
+            .label {{ font-weight: bold; margin-right: 4px; min-width: 20px; }}
+            .copy-btn {{
+                margin-left: 8px; padding: 0px 4px; font-size: 9px; cursor: pointer;
+                border-radius: 3px; border: 1px solid #e0e0e0; background: #ffffff;
+                color: #1E88E5; height: 16px; display: flex; align-items: center; line-height: 1;
+            }}
+            .copy-btn:hover {{ background: #f0f7ff; }}
+        </style>
+        
+        <div class="row"><span style="font-weight:bold; font-size:15px;">{name}</span> <button class="copy-btn" onclick="copyToClipboard('{name}')">📋 Copy</button></div>
+        <div class="row"><span class="label">🆔</span> {ms} <button class="copy-btn" onclick="copyToClipboard('{ms}')">📋 Copy</button></div>
+        <div class="row"><span class="label">🎂</span> {d} <button class="copy-btn" onclick="copyToClipboard('{d}')">📋 Copy</button></div>
+        <div class="row" style="display: {'none' if cccd == 'N/A' else 'flex'};"><span class="label">🪪</span> {cccd_d} <button class="copy-btn" onclick="copyToClipboard('{cccd}')">📋 Copy</button></div>
+
+        <script>
+        function copyToClipboard(text) {{
+            const el = document.createElement('textarea');
+            el.value = text;
+            document.body.appendChild(el);
+            el.select();
+            document.execCommand('copy');
+            document.body.removeChild(el);
+        }}
+        </script>
+    </body>
+    """
+    # Tăng chiều cao để chứa đủ 4 dòng thông tin mà không bị cắt
+    components.html(html, height=110)
+
+# --- 3. HÀM TRA CỨU TỐI ƯU HÓA (CACHED) ---
+
+@st.cache_data(ttl=600)
 def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
-    """Hàm thực hiện tra cứu với tốc độ cao và làm sạch dữ liệu ngay lập tức"""
+    """Hàm thực hiện tra cứu với logic tối ưu hóa tốc độ SQL"""
     conn = get_db_connection()
-    if not conn: return pd.DataFrame()
+    if not conn: return []
     try:
         with conn.cursor() as cur:
             fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
@@ -70,14 +117,11 @@ def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
             elif sfilter == "Còn hạn": where += " AND han_the >= CURRENT_DATE"
 
             cur.execute(f"SELECT {fields} FROM participants WHERE {where} ORDER BY ho_ten ASC LIMIT %(limit)s", params)
-            rows = cur.fetchall()
-            df = pd.DataFrame(rows, columns=fields.split(", "))
-            # Làm sạch dữ liệu: Chuyển NaN thành chuỗi rỗng
-            return df.fillna("")
-    except: return pd.DataFrame()
+            return cur.fetchall()
+    except: return []
     finally: conn.close()
 
-# --- 3. LOGIC XÁC THỰC & QUẢN TRỊ ---
+# --- 4. LOGIC XÁC THỰC & QUẢN TRỊ ---
 
 def login_user(email, password):
     try:
@@ -144,7 +188,7 @@ def get_advanced_stats():
         return stats
     finally: conn.close()
 
-# --- 4. LOGIC XỬ LÝ DỮ LIỆU PDF ---
+# --- 5. LOGIC XỬ LÝ DỮ LIỆU PDF ---
 
 def parse_bhxh_pdf(pdf_file):
     history_data, seen_records = [], set()
@@ -195,7 +239,6 @@ def save_bhxh_history(msbhxh, data, summary):
     finally: conn.close()
 
 def import_db_logic(df):
-    """Nạp dữ liệu dùng bảng tạm để giải quyết triệt để lỗi UniqueViolation cho cả Mã BHXH và CCCD"""
     df.columns = [str(c).strip().lower() for c in df.columns]
     mapping = {'ma so bhxh': 'ma_so_bhxh', 'mã số bhxh': 'ma_so_bhxh', 'ho ten': 'ho_ten', 'ngay sinh': 'ngay_sinh',
                'cccd': 'cccd', 'sdt': 'sdt', 'diachilh': 'dia_chi', 'hantheden': 'han_the', 'email': 'email'}
@@ -209,29 +252,26 @@ def import_db_logic(df):
         df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df[col] = df[col].where(~df[col].isin(['nan', 'None', 'NAT', 'NaT', '']), None)
     df = df.drop_duplicates(subset=['ma_so_bhxh'], keep='first')
+    if 'cccd' in df.columns:
+        df_valid_cccd = df[df['cccd'].notnull()].drop_duplicates(subset=['cccd'], keep='first')
+        df = pd.concat([df_valid_cccd, df[df['cccd'].isnull()]])
     data = list(df[target].itertuples(index=False, name=None))
     if not data: return
     conn = get_db_connection()
     if not conn: return
     try:
         cur = conn.cursor()
-        # 1. Tạo bảng tạm để chứa dữ liệu mới
         cur.execute("""CREATE TEMP TABLE temp_import (ma_so_bhxh VARCHAR(15), ma_the_bhyt VARCHAR(15), ho_ten TEXT, 
                 ngay_sinh DATE, cccd VARCHAR(12), dia_chi TEXT, sdt VARCHAR(15), email TEXT, han_the DATE) ON COMMIT DROP;""")
         execute_values(cur, "INSERT INTO temp_import VALUES %s", data)
-        # 2. Chỉ nạp những người có mã BHXH VÀ CCCD chưa tồn tại trong hệ thống (Fix UniqueViolation)
         sql_insert = """INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
             SELECT t.ma_so_bhxh, t.ma_the_bhyt, t.ho_ten, t.ngay_sinh, t.cccd, t.dia_chi, t.sdt, t.email, t.han_the
-            FROM temp_import t WHERE NOT EXISTS (
-                SELECT 1 FROM participants p 
-                WHERE p.ma_so_bhxh = t.ma_so_bhxh 
-                OR (t.cccd IS NOT NULL AND p.cccd = t.cccd)
-            );"""
+            FROM temp_import t WHERE NOT EXISTS (SELECT 1 FROM participants p WHERE p.ma_so_bhxh = t.ma_so_bhxh OR (t.cccd IS NOT NULL AND p.cccd = t.cccd));"""
         cur.execute(sql_insert); conn.commit(); yield len(data)
     except Exception as e: conn.rollback(); st.error(f"Lỗi nạp dữ liệu: {e}")
     finally: conn.close()
 
-# --- 5. GIAO DIỆN CHÍNH ---
+# --- 6. GIAO DIỆN CHÍNH ---
 
 if 'user' not in st.session_state: st.session_state.user = None
 if 'threshold' not in st.session_state: st.session_state.threshold = 0.85
@@ -295,63 +335,45 @@ elif choice == "🔍 Tra cứu & Quá trình":
             q_s = ""
 
     if st.button("🚀 Thực hiện tra cứu", use_container_width=True):
-        df_res = perform_search(stype, q_m, q_s, sfilter, slimit, st.session_state.threshold)
-        log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(df_res)})
+        rows = perform_search(stype, q_m, q_s, sfilter, slimit, st.session_state.threshold)
+        log_activity("SEARCH", {"type": stype, "q": q_m, "count": len(rows)})
         
-        if not df_res.empty:
-            st.success(f"Tìm thấy {len(df_res)} kết quả.")
-            
-            # --- FIX HIỂN THỊ HTML: DÙNG MỘT KHỐI RENDER AN TOÀN ---
-            html_rows = []
-            for _, r in df_res.iterrows():
-                ms = str(r['ma_so_bhxh']); name = str(r['ho_ten'])
-                dob = pd.to_datetime(r['ngay_sinh']).strftime('%d/%m/%Y') if r['ngay_sinh'] else "N/A"
-                cccd = str(r['cccd']); cccd_d = f"{cccd[:3]}***{cccd[-3:]}" if len(cccd) >= 6 else cccd
-                addr = str(r['dia_chi']); sdt = str(r['sdt'])
-                qtr = f"<span style='background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:12px;font-size:0.85em;font-weight:bold;'>📈 {r['tong_thoi_gian_bhxh']}</span>" if r['tong_thoi_gian_bhxh'] else "<span style='background:#f5f5f5;color:#9e9e9e;padding:2px 8px;border-radius:12px;font-size:0.85em;'>💡 Chưa có quá trình</span>"
-                han = pd.to_datetime(r['han_the']).strftime('%d/%m/%Y') if r['han_the'] else "N/A"
-                
-                html_rows.append(f"""
-                <div style="border-bottom: 1px solid #eee; padding: 12px 0; display: flex; align-items: center; font-family: sans-serif;">
-                    <div style="flex: 3.5;">
-                        <div style="font-weight: bold; color: #1E88E5; font-size: 1.1em;">{name}</div>
-                        <div style="color: #555; font-size: 0.85em; margin-top: 4px;">🆔 {ms} | 🎂 {dob} | 🪪 {cccd_d}</div>
-                    </div>
-                    <div style="flex: 3; color: #666; font-size: 0.9em;">
-                        📍 {addr}<br>📞 {sdt}
-                    </div>
-                    <div style="flex: 3.5;">
-                        {qtr}<br>
-                        <small style='color:#888'>🏥 Hạn BHYT: {han}</small>
-                    </div>
-                </div>
-                """)
-            
-            full_html = f"""
-            <div style="background: white; border-radius: 8px; padding: 10px;">
-                {''.join(html_rows)}
-            </div>
-            """
-            st.markdown(full_html, unsafe_allow_html=True)
-            
-            # --- CHI TIẾT QUÁ TRÌNH ---
-            st.write("---")
-            st.subheader("📜 Xem bảng chi tiết BHXH")
-            selected_person = st.selectbox("Chọn người tham gia để xem lịch sử đóng đầy đủ:", 
-                                         options=df_res['ma_so_bhxh'].tolist(),
-                                         format_func=lambda x: f"{df_res[df_res['ma_so_bhxh']==x]['ho_ten'].values[0]} ({x})")
-            
-            if selected_person:
-                conn = get_db_connection()
-                if conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (selected_person,))
-                        h_rows = cur.fetchall()
-                        if h_rows:
-                            df_h = pd.DataFrame(h_rows, columns=["Từ", "Đến", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"])
-                            st.table(df_h.style.format({"Mức đóng": "{:,.0f}đ"}))
-                        else: st.info("Người này chưa được nạp file PDF quá trình.")
-                    conn.close()
+        if rows:
+            st.success(f"Tìm thấy {len(rows)} kết quả.")
+            for r in rows:
+                with st.container(border=True):
+                    c1, c2, c3, c4 = st.columns([4, 3, 3, 2])
+                    msbhxh = str(r[0])
+                    dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
+                    cccd_raw = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else 'N/A'
+                    cccd_display = f"{cccd_raw[:3]}***{cccd_raw[-3:]}" if cccd_raw != 'N/A' and len(cccd_raw) >= 6 else cccd_raw
+                    
+                    with c1:
+                        # TỐI ƯU: Chỉ gọi 01 khung HTML duy nhất cho cả khối thông tin
+                        render_identity_block(r[2], msbhxh, dob_str, cccd_raw, cccd_display)
+                    with c2:
+                        r_addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else 'Chưa rõ địa chỉ'
+                        r_sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan', ''] else 'Chưa có SĐT'
+                        st.caption(f"📍 {r_addr}")
+                        st.markdown(f"📞 `{r_sdt}`")
+                    with c3:
+                        if r[9]: st.success(f"📈 {r[9]}")
+                        else: st.info("💡 Chưa nạp PDF quá trình")
+                        expiry_str = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'
+                        st.caption(f"🏥 Hạn BHYT: {expiry_str}")
+                    with c4:
+                        with st.expander("📜 Chi tiết BHXH", expanded=False):
+                            conn = get_db_connection()
+                            if conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (msbhxh.strip(),))
+                                    h_rows = cur.fetchall()
+                                    if h_rows:
+                                        df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
+                                        def style_row(row): return ['color: #1a73e8; font-weight: bold;' if row['Loại'] == 'BHXH' else 'color: #5f6368;'] * len(row)
+                                        st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}).apply(style_row, axis=1), use_container_width=True, hide_index=True)
+                                    else: st.warning("Vui lòng nạp PDF Mẫu 07/SBH.")
+                                conn.close()
         else: st.warning("Không tìm thấy dữ liệu.")
 
 elif choice == "🧮 Tiện ích tính toán":
