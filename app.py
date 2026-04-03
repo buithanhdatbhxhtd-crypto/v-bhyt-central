@@ -11,7 +11,6 @@ import json
 import plotly.express as px
 import pdfplumber
 import re
-import streamlit.components.v1 as components
 
 # --- 1. CẤU HÌNH & KHỞI TẠO ---
 st.set_page_config(
@@ -37,53 +36,7 @@ def get_db_connection():
     except Exception:
         return None
 
-# --- 2. HÀM HIỂN THỊ KHỐI DANH TÍNH TỐI ƯU (GIẢM TẢI HIỂN THỊ) ---
-def render_identity_block(full_name, msbhxh, dob, cccd_raw, cccd_display):
-    """Hiển thị toàn bộ thông tin định danh và nút copy trong 01 khung duy nhất để tăng tốc độ"""
-    
-    def clean(val): return val if val and str(val).lower() not in ['none', 'nan', ''] else "N/A"
-    
-    name = clean(full_name)
-    ms = clean(msbhxh)
-    d = clean(dob)
-    cccd = clean(cccd_raw)
-    cccd_d = clean(cccd_display)
-
-    # JS Code dùng chung cho tất cả các nút trong block
-    html = f"""
-    <body style="margin: 0; padding: 0; overflow: hidden; background: transparent; font-family: sans-serif;">
-        <style>
-            .row {{ display: flex; align-items: center; height: 26px; font-size: 13px; color: #31333F; }}
-            .label {{ font-weight: bold; margin-right: 4px; min-width: 20px; }}
-            .copy-btn {{
-                margin-left: 8px; padding: 0px 4px; font-size: 9px; cursor: pointer;
-                border-radius: 3px; border: 1px solid #e0e0e0; background: #ffffff;
-                color: #1E88E5; height: 16px; display: flex; align-items: center; line-height: 1;
-            }}
-            .copy-btn:hover {{ background: #f0f7ff; }}
-        </style>
-        
-        <div class="row"><span style="font-weight:bold; font-size:15px;">{name}</span> <button class="copy-btn" onclick="copyToClipboard('{name}')">📋 Copy</button></div>
-        <div class="row"><span class="label">🆔</span> {ms} <button class="copy-btn" onclick="copyToClipboard('{ms}')">📋 Copy</button></div>
-        <div class="row"><span class="label">🎂</span> {d} <button class="copy-btn" onclick="copyToClipboard('{d}')">📋 Copy</button></div>
-        <div class="row" style="display: {'none' if cccd == 'N/A' else 'flex'};"><span class="label">🪪</span> {cccd_d} <button class="copy-btn" onclick="copyToClipboard('{cccd}')">📋 Copy</button></div>
-
-        <script>
-        function copyToClipboard(text) {{
-            const el = document.createElement('textarea');
-            el.value = text;
-            document.body.appendChild(el);
-            el.select();
-            document.execCommand('copy');
-            document.body.removeChild(el);
-        }}
-        </script>
-    </body>
-    """
-    # Tăng chiều cao để chứa đủ 4 dòng thông tin mà không bị cắt
-    components.html(html, height=110)
-
-# --- 3. HÀM TRA CỨU TỐI ƯU HÓA (CACHED) ---
+# --- 2. HÀM TRA CỨU TỐI ƯU HÓA (CACHED) ---
 
 @st.cache_data(ttl=600)
 def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
@@ -121,7 +74,7 @@ def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
     except: return []
     finally: conn.close()
 
-# --- 4. LOGIC XÁC THỰC & QUẢN TRỊ ---
+# --- 3. LOGIC XÁC THỰC & QUẢN TRỊ ---
 
 def login_user(email, password):
     try:
@@ -188,7 +141,7 @@ def get_advanced_stats():
         return stats
     finally: conn.close()
 
-# --- 5. LOGIC XỬ LÝ DỮ LIỆU PDF ---
+# --- 4. LOGIC XỬ LÝ DỮ LIỆU PDF ---
 
 def parse_bhxh_pdf(pdf_file):
     history_data, seen_records = [], set()
@@ -271,7 +224,7 @@ def import_db_logic(df):
     except Exception as e: conn.rollback(); st.error(f"Lỗi nạp dữ liệu: {e}")
     finally: conn.close()
 
-# --- 6. GIAO DIỆN CHÍNH ---
+# --- 5. GIAO DIỆN CHÍNH ---
 
 if 'user' not in st.session_state: st.session_state.user = None
 if 'threshold' not in st.session_state: st.session_state.threshold = 0.85
@@ -342,18 +295,24 @@ elif choice == "🔍 Tra cứu & Quá trình":
             st.success(f"Tìm thấy {len(rows)} kết quả.")
             for r in rows:
                 with st.container(border=True):
+                    # BỐ CỤC SIÊU TỐC: Không dùng iframe, chỉ dùng Streamlit Native
                     c1, c2, c3, c4 = st.columns([4, 3, 3, 2])
+                    
+                    def clean_val(v): return v if v and str(v).lower() not in ['none', 'nan', ''] else "N/A"
+                    
                     msbhxh = str(r[0])
                     dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
                     cccd_raw = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else 'N/A'
                     cccd_display = f"{cccd_raw[:3]}***{cccd_raw[-3:]}" if cccd_raw != 'N/A' and len(cccd_raw) >= 6 else cccd_raw
                     
                     with c1:
-                        # TỐI ƯU: Chỉ gọi 01 khung HTML duy nhất cho cả khối thông tin
-                        render_identity_block(r[2], msbhxh, dob_str, cccd_raw, cccd_display)
+                        st.markdown(f"**{r[2]}**")
+                        st.caption(f"🆔 {msbhxh} | 🎂 {dob_str}")
+                        if cccd_raw != 'N/A':
+                            st.caption(f"🪪 {cccd_display}")
                     with c2:
-                        r_addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else 'Chưa rõ địa chỉ'
-                        r_sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan', ''] else 'Chưa có SĐT'
+                        r_addr = clean_val(r[5])
+                        r_sdt = clean_val(r[6])
                         st.caption(f"📍 {r_addr}")
                         st.markdown(f"📞 `{r_sdt}`")
                     with c3:
@@ -362,17 +321,16 @@ elif choice == "🔍 Tra cứu & Quá trình":
                         expiry_str = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'
                         st.caption(f"🏥 Hạn BHYT: {expiry_str}")
                     with c4:
-                        with st.expander("📜 Chi tiết BHXH", expanded=False):
+                        with st.expander("📜 Chi tiết", expanded=False):
                             conn = get_db_connection()
                             if conn:
                                 with conn.cursor() as cur:
                                     cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (msbhxh.strip(),))
                                     h_rows = cur.fetchall()
                                     if h_rows:
-                                        df_h = pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị/Công việc", "Mức đóng", "Tỷ lệ", "Loại"])
-                                        def style_row(row): return ['color: #1a73e8; font-weight: bold;' if row['Loại'] == 'BHXH' else 'color: #5f6368;'] * len(row)
-                                        st.dataframe(df_h.style.format({"Mức đóng": "{:,.0f}đ"}).apply(style_row, axis=1), use_container_width=True, hide_index=True)
-                                    else: st.warning("Vui lòng nạp PDF Mẫu 07/SBH.")
+                                        df_h = pd.DataFrame(h_rows, columns=["Từ", "Đến", "Đơn vị", "Mức", "TL", "Loại"])
+                                        st.dataframe(df_h.style.format({"Mức": "{:,.0f}đ"}), use_container_width=True, hide_index=True)
+                                    else: st.warning("Trống")
                                 conn.close()
         else: st.warning("Không tìm thấy dữ liệu.")
 
