@@ -38,9 +38,9 @@ def get_db_connection():
 
 # --- 2. HÀM TRA CỨU TỐI ƯU HÓA (CACHED) ---
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300) # Lưu kết quả 5 phút để tránh truy vấn lặp lại
 def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
-    """Hàm thực hiện tra cứu với logic tối ưu hóa tốc độ SQL"""
+    """Hàm thực hiện tra cứu với tốc độ cao bằng SQL trực tiếp"""
     conn = get_db_connection()
     if not conn: return []
     try:
@@ -141,7 +141,7 @@ def get_advanced_stats():
         return stats
     finally: conn.close()
 
-# --- 4. LOGIC XỬ LÝ DỮ LIỆU PDF ---
+# --- 4. LOGIC XỬ LÝ DỮ LIỆU ---
 
 def parse_bhxh_pdf(pdf_file):
     history_data, seen_records = [], set()
@@ -293,45 +293,66 @@ elif choice == "🔍 Tra cứu & Quá trình":
         
         if rows:
             st.success(f"Tìm thấy {len(rows)} kết quả.")
+            
+            # --- TỐI ƯU SIÊU TỐC: DÙNG MỘT KHỐI HTML DUY NHẤT ---
+            html_results = """
+            <style>
+                .res-row { border-bottom: 1px solid #eee; padding: 12px 0; display: flex; align-items: center; font-family: sans-serif; }
+                .res-col-1 { flex: 3; }
+                .res-col-2 { flex: 3; color: #666; font-size: 0.9em; }
+                .res-col-3 { flex: 4; }
+                .res-name { font-weight: bold; color: #1E88E5; font-size: 1.1em; }
+                .res-meta { color: #555; font-size: 0.85em; margin-top: 4px; }
+                .res-tag { background: #e8f5e9; color: #2e7d32; padding: 2px 8px; border-radius: 12px; font-size: 0.85em; font-weight: bold; border: 1px solid #c8e6c9; }
+                .res-tag-none { background: #f5f5f5; color: #9e9e9e; padding: 2px 8px; border-radius: 12px; font-size: 0.85em; }
+            </style>
+            """
+            
             for r in rows:
-                with st.container(border=True):
-                    # BỐ CỤC SIÊU TỐC: Không dùng iframe, chỉ dùng Streamlit Native
-                    c1, c2, c3, c4 = st.columns([4, 3, 3, 2])
-                    
-                    def clean_val(v): return v if v and str(v).lower() not in ['none', 'nan', ''] else "N/A"
-                    
-                    msbhxh = str(r[0])
-                    dob_str = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
-                    cccd_raw = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else 'N/A'
-                    cccd_display = f"{cccd_raw[:3]}***{cccd_raw[-3:]}" if cccd_raw != 'N/A' and len(cccd_raw) >= 6 else cccd_raw
-                    
-                    with c1:
-                        st.markdown(f"**{r[2]}**")
-                        st.caption(f"🆔 {msbhxh} | 🎂 {dob_str}")
-                        if cccd_raw != 'N/A':
-                            st.caption(f"🪪 {cccd_display}")
-                    with c2:
-                        r_addr = clean_val(r[5])
-                        r_sdt = clean_val(r[6])
-                        st.caption(f"📍 {r_addr}")
-                        st.markdown(f"📞 `{r_sdt}`")
-                    with c3:
-                        if r[9]: st.success(f"📈 {r[9]}")
-                        else: st.info("💡 Chưa nạp PDF quá trình")
-                        expiry_str = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else 'N/A'
-                        st.caption(f"🏥 Hạn BHYT: {expiry_str}")
-                    with c4:
-                        with st.expander("📜 Chi tiết", expanded=False):
-                            conn = get_db_connection()
-                            if conn:
-                                with conn.cursor() as cur:
-                                    cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (msbhxh.strip(),))
-                                    h_rows = cur.fetchall()
-                                    if h_rows:
-                                        df_h = pd.DataFrame(h_rows, columns=["Từ", "Đến", "Đơn vị", "Mức", "TL", "Loại"])
-                                        st.dataframe(df_h.style.format({"Mức": "{:,.0f}đ"}), use_container_width=True, hide_index=True)
-                                    else: st.warning("Trống")
-                                conn.close()
+                ms = str(r[0]); name = str(r[2])
+                dob = pd.to_datetime(r[3]).strftime('%d/%m/%Y') if r[3] else "N/A"
+                cccd = str(r[4]) if r[4] and str(r[4]) not in ['None', 'nan', ''] else "N/A"
+                cccd_d = f"{cccd[:3]}***{cccd[-3:]}" if cccd != "N/A" and len(cccd) >= 6 else cccd
+                addr = r[5] if r[5] and str(r[5]) not in ['None', 'nan', ''] else "Chưa rõ địa chỉ"
+                sdt = r[6] if r[6] and str(r[6]) not in ['None', 'nan', ''] else "N/A"
+                qtr = f"<span class='res-tag'>📈 {r[9]}</span>" if r[9] else "<span class='res-tag-none'>💡 Chưa có quá trình</span>"
+                han = pd.to_datetime(r[8]).strftime('%d/%m/%Y') if r[8] else "N/A"
+                
+                html_results += f"""
+                <div class="res-row">
+                    <div class="res-col-1">
+                        <div class="res-name">{name}</div>
+                        <div class="res-meta">🆔 {ms} | 🎂 {dob} | 🪪 {cccd_d}</div>
+                    </div>
+                    <div class="res-col-2">
+                        📍 {addr}<br>📞 {sdt}
+                    </div>
+                    <div class="res-col-3">
+                        {qtr}<br>
+                        <small style='color:#888'>🏥 Hạn BHYT: {han}</small>
+                    </div>
+                </div>
+                """
+            st.markdown(html_results, unsafe_allow_html=True)
+            
+            # --- CHI TIẾT QUÁ TRÌNH (TẢI THEO YÊU CẦU) ---
+            st.write("---")
+            st.subheader("📜 Xem bảng chi tiết BHXH")
+            selected_person = st.selectbox("Chọn người tham gia để xem lịch sử đóng đầy đủ:", 
+                                         options=[(r[0], r[2]) for r in rows],
+                                         format_func=lambda x: f"{x[1]} ({x[0]})")
+            
+            if selected_person:
+                conn = get_db_connection()
+                if conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (selected_person[0],))
+                        h_rows = cur.fetchall()
+                        if h_rows:
+                            df_h = pd.DataFrame(h_rows, columns=["Từ", "Đến", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"])
+                            st.table(df_h.style.format({"Mức đóng": "{:,.0f}đ"}))
+                        else: st.info("Người này chưa được nạp file PDF quá trình.")
+                    conn.close()
         else: st.warning("Không tìm thấy dữ liệu.")
 
 elif choice == "🧮 Tiện ích tính toán":
