@@ -341,7 +341,8 @@ elif choice == "🔍 Tra cứu & Quá trình":
             if pd.isna(x) or str(x).lower() in ['none', 'nan', 'nat', '']: return ""
             return str(x)
         for col in df_display.columns: df_display[col] = df_display[col].apply(clean_fmt)
-        df_display["CCCD"] = df_display["CCCD"].apply(lambda x: f"{x[:3]}***{x[-3:]}" if len(x) >= 6 else x)
+        
+        # Giữ nguyên số CCCD đầy đủ, không che dấu ***
         for d_col in ["Ngày sinh", "Hạn thẻ"]:
             df_display[d_col] = pd.to_datetime(df_display[d_col], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
         st.success(f"Tìm thấy {len(rows)} kết quả.")
