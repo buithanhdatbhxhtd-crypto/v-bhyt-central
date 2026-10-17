@@ -200,8 +200,15 @@ def save_bhxh_history(msbhxh, data, summary):
     except: return False
     finally: conn.close()
 
-def import_db_logic(df):
-    """Nạp dữ liệu ổn định với Mapping tiêu đề chuẩn theo file của bạn"""
+def import_db_logic(df, import_mode="MERGE"):
+    """
+    Nạp dữ liệu bổ sung an toàn:
+    - Giữ nguyên 100% dữ liệu cũ đã có trong hệ thống.
+    - Tự động xử lý trùng CCCD để không bị lỗi dừng đột ngột (UniqueViolation).
+    - Hỗ trợ 2 chế độ: 
+      + MERGE: Thêm người mới & cập nhật bổ sung thông tin mới (giữ lại thông tin cũ nếu file mới bị trống).
+      + INSERT_ONLY: Chỉ thêm người có Mã BHXH mới, bỏ qua nếu đã tồn tại.
+    """
     df.columns = [str(c).strip().lower() for c in df.columns]
     
     mapping = {
@@ -210,13 +217,19 @@ def import_db_logic(df):
         'ma the bhyt': 'ma_the_bhyt',
         'mã thẻ bhyt': 'ma_the_bhyt',
         'ho ten': 'ho_ten', 
+        'họ tên': 'ho_ten',
         'ngay sinh': 'ngay_sinh',
+        'ngày sinh': 'ngay_sinh',
         'cccd': 'cccd', 
         'socmnd': 'cccd',        
         'sdt': 'sdt', 
         'sodienthoai': 'sdt',    
         'diachilh': 'dia_chi',   
+        'dia chi': 'dia_chi',
+        'địa chỉ': 'dia_chi',
         'hantheden': 'han_the',  
+        'han the': 'han_the',
+        'hạn thẻ': 'han_the',
         'email': 'email',
         'vss_email': 'email'     
     }
@@ -226,17 +239,25 @@ def import_db_logic(df):
     for col in target:
         if col not in df.columns: df[col] = None
     
-    # Làm sạch NaN
+    # Làm sạch định dạng ngày tháng
     for col in ['ngay_sinh', 'han_the']:
         df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).apply(lambda x: x.date() if pd.notnull(x) else None)
     
+    # Làm sạch chuỗi và loại bỏ các giá trị NaN
     for col in ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'email', 'dia_chi']:
         df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         df[col] = df[col].where(~df[col].isin(['nan', 'None', 'NAT', 'NaT', '']), None)
     
+    # Bỏ qua các dòng trống không có Mã số BHXH hoặc Họ tên
+    df = df[df['ma_so_bhxh'].notnull() & df['ho_ten'].notnull()]
     df = df.drop_duplicates(subset=['ma_so_bhxh'], keep='first')
-    data = list(df[target].itertuples(index=False, name=None))
     
+    # Nếu trong cùng file Excel có 2 Mã BHXH khác nhau nhưng bị nhập trùng số CCCD,
+    # giữ CCCD ở dòng đầu và tạm để trống CCCD ở dòng trùng để vẫn nạp được người đó vào hệ thống
+    mask_dup_cccd = df['cccd'].notnull() & df.duplicated(subset=['cccd'], keep='first')
+    df.loc[mask_dup_cccd, 'cccd'] = None
+
+    data = list(df[target].itertuples(index=False, name=None))
     if not data: return
 
     conn = get_db_connection()
@@ -244,18 +265,66 @@ def import_db_logic(df):
     
     try:
         cur = conn.cursor()
-        sql = """
-            INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
-            VALUES %s ON CONFLICT (ma_so_bhxh) DO UPDATE SET
-                ma_the_bhyt = EXCLUDED.ma_the_bhyt, ho_ten = EXCLUDED.ho_ten, ngay_sinh = EXCLUDED.ngay_sinh,
-                cccd = EXCLUDED.cccd, dia_chi = EXCLUDED.dia_chi, sdt = EXCLUDED.sdt, email = EXCLUDED.email, 
-                han_the = EXCLUDED.han_the, updated_at = NOW();
-        """
-        for i in range(0, len(data), 5000):
+        # Tạo bảng tạm tự làm sạch sau mỗi lô (5.000 dòng) để kiểm tra xung đột cực nhanh
+        cur.execute("""
+            CREATE TEMP TABLE temp_import (
+                ma_so_bhxh VARCHAR(15), ma_the_bhyt VARCHAR(15), ho_ten TEXT, 
+                ngay_sinh DATE, cccd VARCHAR(12), dia_chi TEXT, 
+                sdt VARCHAR(15), email TEXT, han_the DATE
+            ) ON COMMIT DELETE ROWS;
+        """)
+
+        if import_mode == "INSERT_ONLY":
+            # Chỉ thêm bản ghi có Mã BHXH chưa từng xuất hiện, giữ nguyên hoàn toàn dữ liệu cũ
+            sql = """
+                INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
+                SELECT 
+                    t.ma_so_bhxh, t.ma_the_bhyt, t.ho_ten, t.ngay_sinh,
+                    CASE 
+                        WHEN t.cccd IS NOT NULL AND EXISTS (
+                            SELECT 1 FROM participants p 
+                            WHERE p.cccd = t.cccd AND p.ma_so_bhxh <> t.ma_so_bhxh
+                        ) THEN NULL
+                        ELSE t.cccd
+                    END,
+                    t.dia_chi, t.sdt, t.email, t.han_the
+                FROM temp_import t
+                ON CONFLICT (ma_so_bhxh) DO NOTHING;
+            """
+        else:
+            # Thêm người mới + Cập nhật thông minh (COALESCE giúp giữ lại thông tin cũ nếu ô trong file mới bị trống)
+            sql = """
+                INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
+                SELECT 
+                    t.ma_so_bhxh, t.ma_the_bhyt, t.ho_ten, t.ngay_sinh,
+                    CASE 
+                        WHEN t.cccd IS NOT NULL AND EXISTS (
+                            SELECT 1 FROM participants p 
+                            WHERE p.cccd = t.cccd AND p.ma_so_bhxh <> t.ma_so_bhxh
+                        ) THEN NULL
+                        ELSE t.cccd
+                    END,
+                    t.dia_chi, t.sdt, t.email, t.han_the
+                FROM temp_import t
+                ON CONFLICT (ma_so_bhxh) DO UPDATE SET
+                    ma_the_bhyt = COALESCE(EXCLUDED.ma_the_bhyt, participants.ma_the_bhyt),
+                    ho_ten = COALESCE(EXCLUDED.ho_ten, participants.ho_ten),
+                    ngay_sinh = COALESCE(EXCLUDED.ngay_sinh, participants.ngay_sinh),
+                    cccd = COALESCE(EXCLUDED.cccd, participants.cccd),
+                    dia_chi = COALESCE(EXCLUDED.dia_chi, participants.dia_chi),
+                    sdt = COALESCE(EXCLUDED.sdt, participants.sdt),
+                    email = COALESCE(EXCLUDED.email, participants.email),
+                    han_the = COALESCE(EXCLUDED.han_the, participants.han_the),
+                    updated_at = NOW();
+            """
+
+        total_rows = len(data)
+        for i in range(0, total_rows, 5000):
             batch = data[i:i + 5000]
-            execute_values(cur, sql, batch)
+            execute_values(cur, "INSERT INTO temp_import VALUES %s", batch)
+            cur.execute(sql)
             conn.commit()
-            yield min(i + 5000, len(data))
+            yield min(i + 5000, total_rows), total_rows
     except Exception as e:
         conn.rollback()
         st.error(f"Lỗi nạp dữ liệu: {e}")
@@ -433,23 +502,34 @@ elif choice == "🧮 Tiện ích tính toán":
         st.markdown(f"### 💰 Thực thu ({method} tháng): `{monthly*method:,.0f} VNĐ`")
 
 elif choice == "📥 Nhập dữ liệu":
-    st.header("📥 Nhập liệu hệ thống")
+    st.header("📥 Nhập liệu hệ thống (Nạp cộng dồn an toàn)")
     tx, tp = st.tabs(["📊 File Excel (BHYT)", "📜 File PDF (Quá trình BHXH)"])
     with tx:
+        st.info("💡 **Cơ chế bảo vệ dữ liệu cũ:** Hệ thống chỉ nạp bổ sung dữ liệu từ file mới vào kho hiện tại, **tuyệt đối không xóa** các bản ghi cũ đã có trong hệ thống.")
+        mode_label = st.radio(
+            "Chọn phương thức xử lý khi gặp Mã số BHXH đã có sẵn trong hệ thống:",
+            [
+                "🔄 Bổ sung & Cập nhật thông minh (Thêm người mới; nếu trùng Mã BHXH thì cập nhật thông tin mới nhưng vẫn giữ lại SĐT/CCCD/Địa chỉ cũ nếu file mới bị trống)",
+                "➕ Chỉ thêm người mới (Chỉ nạp các Mã BHXH chưa có trong hệ thống, bỏ qua hoàn toàn nếu đã tồn tại)"
+            ]
+        )
+        import_mode = "MERGE" if "🔄" in mode_label else "INSERT_ONLY"
+        
         f = st.file_uploader("Chọn file Excel", type=["xlsx", "xlsb"])
         if f and st.button("🚀 Bắt đầu nạp BHYT"):
             engine = 'pyxlsb' if f.name.endswith('.xlsb') else 'openpyxl'
             try:
-                df = pd.read_excel(f, dtype=str, engine=engine)
+                with st.spinner("Đang đọc và chuẩn hóa file Excel..."):
+                    df = pd.read_excel(f, dtype=str, engine=engine)
                 pb, txt = st.progress(0), st.empty()
                 processed = 0
-                for count in import_db_logic(df):
+                for count, total in import_db_logic(df, import_mode=import_mode):
                     processed = count
-                    pb.progress(1.0)
-                    txt.text(f"Đã xử lý xong {processed:,} hàng.")
+                    pb.progress(min(processed / total, 1.0))
+                    txt.text(f"⏳ Đang nạp và đồng bộ: {processed:,} / {total:,} bản ghi...")
                 st.cache_data.clear()
-                st.success(f"Đã nạp/cập nhật thành công {processed:,} bản ghi.")
-                log_activity("IMPORT_EXCEL", {"rows": len(df)})
+                st.success(f"✅ Hoàn tất! Đã xử lý và nạp bổ sung thành công {processed:,} bản ghi vào hệ thống (dữ liệu cũ được bảo toàn).")
+                log_activity("IMPORT_EXCEL", {"rows": len(df), "mode": import_mode})
             except Exception as e: st.error(f"Lỗi đọc file: {e}")
     with tp:
         pdf_f = st.file_uploader("Chọn file PDF (Mẫu 07/SBH)", type=["pdf"])
