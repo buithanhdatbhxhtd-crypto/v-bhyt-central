@@ -257,20 +257,44 @@ def import_db_logic(df, import_mode="MERGE"):
     mask_dup_cccd = df['cccd'].notnull() & df.duplicated(subset=['cccd'], keep='first')
     df.loc[mask_dup_cccd, 'cccd'] = None
 
-    data = list(df[target].itertuples(index=False, name=None))
-    if not data: return
-
     conn = get_db_connection()
     if not conn: return
     
+    # Tự động mở rộng giới hạn ký tự các cột trong CSDL (phòng trường hợp SĐT ghi 2 số, có ghi chú hoặc Mã thẻ/CCCD dư ký tự)
+    try:
+        with conn.cursor() as alter_cur:
+            alter_cur.execute("""
+                ALTER TABLE participants 
+                    ALTER COLUMN ma_so_bhxh TYPE VARCHAR(50),
+                    ALTER COLUMN ma_the_bhyt TYPE VARCHAR(50),
+                    ALTER COLUMN cccd TYPE VARCHAR(50),
+                    ALTER COLUMN sdt TYPE VARCHAR(100);
+            """)
+        conn.commit()
+        max_len_15, max_len_12, max_len_sdt = 50, 50, 100
+    except Exception:
+        conn.rollback()
+        max_len_15, max_len_12, max_len_sdt = 15, 12, 15
+
+    # Cắt giới hạn an toàn để tuyệt đối không bao giờ xảy ra lỗi "value too long"
+    df['ma_so_bhxh'] = df['ma_so_bhxh'].apply(lambda x: x[:max_len_15] if x else None)
+    df['ma_the_bhyt'] = df['ma_the_bhyt'].apply(lambda x: x[:max_len_15] if x else None)
+    df['cccd'] = df['cccd'].apply(lambda x: x[:max_len_12] if x else None)
+    df['sdt'] = df['sdt'].apply(lambda x: x[:max_len_sdt] if x else None)
+
+    data = list(df[target].itertuples(index=False, name=None))
+    if not data:
+        conn.close()
+        return
+
     try:
         cur = conn.cursor()
-        # Tạo bảng tạm tự làm sạch sau mỗi lô (5.000 dòng) để kiểm tra xung đột cực nhanh
+        # Tạo bảng tạm dùng kiểu TEXT linh hoạt để không bị lỗi độ dài ký tự
         cur.execute("""
             CREATE TEMP TABLE temp_import (
-                ma_so_bhxh VARCHAR(15), ma_the_bhyt VARCHAR(15), ho_ten TEXT, 
-                ngay_sinh DATE, cccd VARCHAR(12), dia_chi TEXT, 
-                sdt VARCHAR(15), email TEXT, han_the DATE
+                ma_so_bhxh TEXT, ma_the_bhyt TEXT, ho_ten TEXT, 
+                ngay_sinh DATE, cccd TEXT, dia_chi TEXT, 
+                sdt TEXT, email TEXT, han_the DATE
             ) ON COMMIT DELETE ROWS;
         """)
 
@@ -527,9 +551,10 @@ elif choice == "📥 Nhập dữ liệu":
                     processed = count
                     pb.progress(min(processed / total, 1.0))
                     txt.text(f"⏳ Đang nạp và đồng bộ: {processed:,} / {total:,} bản ghi...")
-                st.cache_data.clear()
-                st.success(f"✅ Hoàn tất! Đã xử lý và nạp bổ sung thành công {processed:,} bản ghi vào hệ thống (dữ liệu cũ được bảo toàn).")
-                log_activity("IMPORT_EXCEL", {"rows": len(df), "mode": import_mode})
+                if processed > 0:
+                    st.cache_data.clear()
+                    st.success(f"✅ Hoàn tất! Đã xử lý và nạp bổ sung thành công {processed:,} bản ghi vào hệ thống (dữ liệu cũ được bảo toàn).")
+                    log_activity("IMPORT_EXCEL", {"rows": len(df), "mode": import_mode})
             except Exception as e: st.error(f"Lỗi đọc file: {e}")
     with tp:
         pdf_f = st.file_uploader("Chọn file PDF (Mẫu 07/SBH)", type=["pdf"])
