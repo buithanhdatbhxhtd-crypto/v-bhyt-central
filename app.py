@@ -12,14 +12,12 @@ import plotly.express as px
 import pdfplumber
 import re
 
-# --- 1. CẤU HÌNH & KHỞI TẠO ---
 st.set_page_config(
     page_title="V-BHYT Central - Giải pháp Quản trị & Nghiệp vụ",
     page_icon="🛡️",
     layout="wide"
 )
 
-# Khởi tạo Supabase cho Auth và Admin API
 @st.cache_resource
 def init_supabase():
     url = st.secrets["SUPABASE_URL"]
@@ -28,7 +26,6 @@ def init_supabase():
 
 supabase: Client = init_supabase()
 
-# Kết nối Database trực tiếp (Postgres)
 def get_db_connection():
     try:
         conn = psycopg2.connect(st.secrets["SUPABASE_DB_URL"], connect_timeout=10)
@@ -36,13 +33,16 @@ def get_db_connection():
     except Exception:
         return None
 
-# --- 2. HÀM TRA CỨU TỐI ƯU HÓA (CACHED) ---
-
 @st.cache_data(ttl=600)
 def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
-    """Hàm thực hiện tra cứu với tốc độ cao bằng SQL trực tiếp và Cache"""
+    """
+    Tra cứu tối ưu hóa:
+    - Hỗ trợ cả Mã BHXH 10 số (cũ) và 12 số (đã đồng bộ CCCD mới).
+    - Tự động tra cứu chéo giữa Mã số BHXH và CCCD để không bỏ sót người tham gia.
+    """
     conn = get_db_connection()
-    if not conn: return []
+    if not conn: 
+        return []
     try:
         with conn.cursor() as cur:
             fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
@@ -50,10 +50,12 @@ def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
             q_m_clean = q_m.strip()
             
             if stype == "Mã BHXH":
-                where = "(ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(lq)s)"
+                # Tìm kiếm linh hoạt: khớp mã BHXH hoặc quét chéo sang CCCD nếu đã chuyển đổi
+                where = "(ma_so_bhxh = %(q)s OR ma_so_bhxh ILIKE %(lq)s OR cccd = %(q)s)"
                 params.update({'q': q_m_clean, 'lq': f"{q_m_clean}%"})
             elif stype == "CCCD":
-                where = "(cccd = %(q)s OR cccd ILIKE %(lq)s)"
+                # Tìm theo CCCD hoặc mã số BHXH nếu đã chuyển thành 12 số
+                where = "(cccd = %(q)s OR cccd ILIKE %(lq)s OR ma_so_bhxh = %(q)s)"
                 params.update({'q': q_m_clean, 'lq': f"{q_m_clean}%"})
             else:
                 name_n = unidecode(q_m_clean).lower()
@@ -61,23 +63,26 @@ def perform_search(stype, q_m, q_s, sfilter, slimit, threshold):
                 where = "(ho_ten_unsigned LIKE %(ln)s OR similarity(ho_ten_unsigned, %(n)s) > %(th)s)"
                 params.update({'n': name_n, 'ln': f"%{name_n}%"})
                 if dob_c:
-                    if len(dob_c) == 4: where += " AND TO_CHAR(ngay_sinh, 'YYYY') = %(d)s"
-                    else: where += " AND (TO_CHAR(ngay_sinh, 'DDMMYYYY') = %(d)s OR TO_CHAR(ngay_sinh, 'YYYYMMDD') = %(d)s)"
+                    if len(dob_c) == 4: 
+                        where += " AND TO_CHAR(ngay_sinh, 'YYYY') = %(d)s"
+                    else: 
+                        where += " AND (TO_CHAR(ngay_sinh, 'DDMMYYYY') = %(d)s OR TO_CHAR(ngay_sinh, 'YYYYMMDD') = %(d)s)"
                     params['d'] = dob_c
 
-            if sfilter == "Đã hết hạn": where += " AND han_the < CURRENT_DATE"
-            elif sfilter == "Sắp hết hạn (30 ngày)": where += " AND han_the >= CURRENT_DATE AND han_the <= CURRENT_DATE + INTERVAL '30 days'"
-            elif sfilter == "Còn hạn": where += " AND han_the >= CURRENT_DATE"
+            if sfilter == "Đã hết hạn": 
+                where += " AND han_the < CURRENT_DATE"
+            elif sfilter == "Sắp hết hạn (30 ngày)": 
+                where += " AND han_the >= CURRENT_DATE AND han_the <= CURRENT_DATE + INTERVAL '30 days'"
+            elif sfilter == "Còn hạn": 
+                where += " AND han_the >= CURRENT_DATE"
 
             query = f"SELECT {fields} FROM participants WHERE {where} ORDER BY ho_ten ASC LIMIT %(limit)s"
             cur.execute(query, params)
             return cur.fetchall()
-    except:
+    except Exception:
         return []
     finally:
         conn.close()
-
-# --- 3. LOGIC XÁC THỰC & QUẢN TRỊ ---
 
 def login_user(email, password):
     try:
@@ -93,19 +98,20 @@ def logout_user():
     st.rerun()
 
 def is_admin():
-    if not st.session_state.user: return False
+    if not st.session_state.user: 
+        return False
     admin_emails = ["admin@example.com", st.secrets.get("ADMIN_EMAIL", "")]
     return st.session_state.user.email in admin_emails
 
 def admin_manage_user(target_email, action, new_password=None):
     try:
-        # Khởi tạo admin client riêng để đảm bảo quyền hạn
         admin_client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
         response = admin_client.auth.admin.list_users()
         all_users = response.users if hasattr(response, 'users') else response
         user = next((u for u in all_users if u.email == target_email), None)
         
-        if not user: return False, "Không tìm thấy người dùng có email này."
+        if not user: 
+            return False, "Không tìm thấy người dùng có email này."
         
         if action == "RESET_PWD":
             admin_client.auth.admin.update_user_by_id(user.id, {"password": new_password})
@@ -114,12 +120,12 @@ def admin_manage_user(target_email, action, new_password=None):
             admin_client.auth.admin.delete_user(user.id)
             return True, f"Đã xóa tài khoản {target_email} khỏi hệ thống."
         return False, "Hành động không hợp lệ."
-    except Exception as e: return False, f"Lỗi quản trị: {str(e)}"
-
-# --- 4. HÀM GHI NHẬT KÝ & THỐNG KÊ ---
+    except Exception as e: 
+        return False, f"Lỗi quản trị: {str(e)}"
 
 def log_activity(action, details_dict):
-    if not st.session_state.user: return
+    if not st.session_state.user: 
+        return
     conn = get_db_connection()
     if conn:
         try:
@@ -127,12 +133,15 @@ def log_activity(action, details_dict):
                 sql = "INSERT INTO audit_logs (email, action, details) VALUES (%(email)s, %(action)s, %(details)s)"
                 cur.execute(sql, {'email': st.session_state.user.email, 'action': action, 'details': json.dumps(details_dict, ensure_ascii=False)})
             conn.commit()
-        except: pass
-        finally: conn.close()
+        except Exception: 
+            pass
+        finally: 
+            conn.close()
 
 def get_advanced_stats():
     conn = get_db_connection()
-    if not conn: return None
+    if not conn: 
+        return None
     stats = {}
     try:
         with conn.cursor() as cur:
@@ -147,9 +156,8 @@ def get_advanced_stats():
             cur.execute("SELECT COUNT(*) FROM audit_logs WHERE action = 'EXPORT'")
             stats['total_exports'] = cur.fetchone()[0]
         return stats
-    finally: conn.close()
-
-# --- 5. LOGIC XỬ LÝ DỮ LIỆU PDF ---
+    finally: 
+        conn.close()
 
 def parse_bhxh_pdf(pdf_file):
     """Trích xuất dữ liệu từ file PDF quá trình đóng BHXH (Mẫu 07/SBH) và lọc trùng"""
@@ -157,22 +165,28 @@ def parse_bhxh_pdf(pdf_file):
     msbhxh, summary_text = "", ""
     with pdfplumber.open(pdf_file) as pdf:
         full_text = ""
-        for page in pdf.pages: full_text += page.extract_text() + "\n"
+        for page in pdf.pages: 
+            full_text += (page.extract_text() or "") + "\n"
         match_ms = re.search(r"Mã số BHXH\s*:\s*(\d+)", full_text)
-        if match_ms: msbhxh = match_ms.group(1).strip()
+        if match_ms: 
+            msbhxh = match_ms.group(1).strip()
         m_bhxh = re.search(r"Thời gian đóng BHXH vào quỹ hưu trí.*?là\s*(.*?)(?:\n|$)", full_text)
         m_bhtn = re.search(r"Thời gian đóng BHTN vào quỹ BHTN.*?là\s*(.*?)(?:\n|$)", full_text)
         sums = []
-        if m_bhxh: sums.append(f"BHXH: {m_bhxh.group(1).strip()}")
-        if m_bhtn: sums.append(f"BHTN: {m_bhtn.group(1).strip()}")
+        if m_bhxh: 
+            sums.append(f"BHXH: {m_bhxh.group(1).strip()}")
+        if m_bhtn: 
+            sums.append(f"BHTN: {m_bhtn.group(1).strip()}")
         summary_text = " | ".join(sums)
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
                 for row in table:
-                    if not row or len(row) < 5 or not row[0]: continue
+                    if not row or len(row) < 5 or not row[0]: 
+                        continue
                     tu_thang = str(row[0]).strip()
-                    if not re.match(r"\d{2}/\d{4}", tu_thang): continue
+                    if not re.match(r"\d{2}/\d{4}", tu_thang): 
+                        continue
                     try:
                         den_thang = str(row[1]).strip() if row[1] else ""
                         don_vi = str(row[2]).strip().replace('\n', ' ')
@@ -184,46 +198,147 @@ def parse_bhxh_pdf(pdf_file):
                         if rec_id not in seen_records:
                             seen_records.add(rec_id)
                             history_data.append((msbhxh, tu_thang, den_thang, don_vi, muc_dong, ty_le, loai_bh))
-                    except: continue
+                    except Exception: 
+                        continue
     return msbhxh, history_data, summary_text
 
 def save_bhxh_history(msbhxh, data, summary):
-    if not msbhxh or not data: return False
+    if not msbhxh or not data: 
+        return False
     conn = get_db_connection()
-    if not conn: return False
+    if not conn: 
+        return False
     try:
         cur = conn.cursor()
         cur.execute("DELETE FROM bhxh_history WHERE ma_so_bhxh = %s", (msbhxh,))
         execute_values(cur, "INSERT INTO bhxh_history (ma_so_bhxh, tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh) VALUES %s", data)
-        if summary: cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = %s WHERE ma_so_bhxh = %s", (summary, msbhxh))
-        conn.commit(); return True
-    except: return False
-    finally: conn.close()
+        if summary: 
+            # Cập nhật cho cả trường hợp mã BHXH là 10 số hoặc đã đồng bộ sang 12 số CCCD
+            cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = %s WHERE ma_so_bhxh = %s OR cccd = %s", (summary, msbhxh, msbhxh))
+        conn.commit()
+        return True
+    except Exception: 
+        return False
+    finally: 
+        conn.close()
+
+def safe_clean_str(val, max_len=None):
+    """Hàm chuẩn hóa chuỗi an toàn tuyệt đối, sửa lỗi 'float' object is not subscriptable"""
+    if pd.isna(val) or val is None:
+        return None
+    s = str(val).strip()
+    if s.endswith('.0'):
+        s = s[:-2]
+    s = s.lstrip("'").strip()
+    if s.lower() in ['nan', 'none', 'nat', 'null', '']:
+        return None
+    return s[:max_len] if max_len else s
+
+def safe_clean_code(val, max_len=50):
+    """Chuẩn hóa Mã số BHXH (10 số hoặc 12 số CCCD) và số CCCD, tự động khôi phục số 0 ở đầu nếu bị Excel làm mất"""
+    s = safe_clean_str(val, max_len)
+    if not s:
+        return None
+    if s.isdigit():
+        if len(s) == 9:
+            s = '0' + s  # Khôi phục số 0 đầu cho Mã BHXH 10 số
+        elif len(s) == 11:
+            s = '0' + s  # Khôi phục số 0 đầu cho Mã BHXH / CCCD 12 số
+    return s
+
+def safe_clean_phone(val, max_len=100):
+    """Chuẩn hóa Số điện thoại, khôi phục số 0 ở đầu nếu bị định dạng số làm mất"""
+    s = safe_clean_str(val, max_len)
+    if not s:
+        return None
+    if s.isdigit() and len(s) == 9:
+        s = '0' + s
+    return s
+
+def safe_parse_date(val):
+    """Chuyển đổi ngày tháng an toàn cho cả chuỗi DD/MM/YYYY và số serial date của file .xlsb"""
+    if pd.isna(val) or val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    s = str(val).strip()
+    if s.endswith('.0'):
+        s = s[:-2]
+    if s.lower() in ['nan', 'none', 'nat', 'null', '']:
+        return None
+    # Xử lý trường hợp pyxlsb trả về số serial date của Excel (VD: 46146)
+    if s.isdigit():
+        num = int(s)
+        if 10000 <= num <= 70000:
+            return (datetime(1899, 12, 30) + timedelta(days=num)).date()
+        elif len(s) == 4 and 1900 <= num <= 2100:
+            return date(num, 1, 1)
+    try:
+        dt = pd.to_datetime(s, errors='coerce', dayfirst=True)
+        return dt.date() if pd.notnull(dt) else None
+    except Exception:
+        return None
+
+def ensure_db_schema():
+    """Tự động nâng cấp cấu trúc bảng trên Supabase để hỗ trợ Mã BHXH 12 số (CCCD) và tránh lỗi giới hạn ký tự"""
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE participants 
+                    ALTER COLUMN ma_so_bhxh TYPE VARCHAR(50),
+                    ALTER COLUMN ma_the_bhyt TYPE VARCHAR(50),
+                    ALTER COLUMN cccd TYPE VARCHAR(50),
+                    ALTER COLUMN sdt TYPE VARCHAR(100);
+                ALTER TABLE participants DROP CONSTRAINT IF EXISTS participants_cccd_key;
+                ALTER TABLE participants ADD COLUMN IF NOT EXISTS tong_thoi_gian_bhxh TEXT;
+                CREATE INDEX IF NOT EXISTS idx_cccd ON participants(cccd);
+            """)
+            cur.execute("""
+                ALTER TABLE bhxh_history 
+                    ALTER COLUMN ma_so_bhxh TYPE VARCHAR(50);
+            """)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        conn.close()
 
 def import_db_logic(df, import_mode="MERGE"):
     """
-    Nạp dữ liệu bổ sung an toàn:
-    - Giữ nguyên 100% dữ liệu cũ đã có trong hệ thống.
-    - Tự động xử lý trùng CCCD để không bị lỗi dừng đột ngột (UniqueViolation).
-    - Hỗ trợ 2 chế độ: 
-      + MERGE: Thêm người mới & cập nhật bổ sung thông tin mới (giữ lại thông tin cũ nếu file mới bị trống).
-      + INSERT_ONLY: Chỉ thêm người có Mã BHXH mới, bỏ qua nếu đã tồn tại.
+    Nạp dữ liệu bảo vệ thông tin cũ và đồng bộ Mã BHXH 10 số <-> 12 số (CCCD):
+    - Xử lý đồng thời Mã số BHXH 10 số và 12 số (CCCD).
+    - Tự động nhận diện người cũ đã có mã 10 số khi nạp mã 12 số (CCCD) để cập nhật thay vì tạo trùng.
+    - Cơ chế MERGE thông minh (không ghi đè ô rỗng lên thông tin cũ).
     """
+    ensure_db_schema()
     df.columns = [str(c).strip().lower() for c in df.columns]
     
     mapping = {
         'ma so bhxh': 'ma_so_bhxh', 
         'mã số bhxh': 'ma_so_bhxh',
+        'masobhxh': 'ma_so_bhxh',
         'ma the bhyt': 'ma_the_bhyt',
         'mã thẻ bhyt': 'ma_the_bhyt',
+        'mathebhyt': 'ma_the_bhyt',
         'ho ten': 'ho_ten', 
         'họ tên': 'ho_ten',
+        'hoten': 'ho_ten',
         'ngay sinh': 'ngay_sinh',
         'ngày sinh': 'ngay_sinh',
+        'ngaysinh': 'ngay_sinh',
         'cccd': 'cccd', 
         'socmnd': 'cccd',        
+        'so cccd': 'cccd',
+        'số cccd': 'cccd',
         'sdt': 'sdt', 
         'sodienthoai': 'sdt',    
+        'so dien thoai': 'sdt',
+        'số điện thoại': 'sdt',
         'diachilh': 'dia_chi',   
         'dia chi': 'dia_chi',
         'địa chỉ': 'dia_chi',
@@ -234,53 +349,38 @@ def import_db_logic(df, import_mode="MERGE"):
         'vss_email': 'email'     
     }
     df = df.rename(columns=mapping)
+    # Nếu file có nhiều cột trùng tên sau khi map, chỉ giữ cột đầu tiên
+    df = df.loc[:, ~df.columns.duplicated()]
     target = ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'ngay_sinh', 'cccd', 'dia_chi', 'sdt', 'email', 'han_the']
     
     for col in target:
-        if col not in df.columns: df[col] = None
+        if col not in df.columns: 
+            df[col] = None
     
-    # Làm sạch định dạng ngày tháng
+    # Định dạng ngày tháng an toàn (hỗ trợ cả chuỗi và số serial Excel)
     for col in ['ngay_sinh', 'han_the']:
-        df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).apply(lambda x: x.date() if pd.notnull(x) else None)
+        df[col] = df[col].apply(safe_parse_date)
     
-    # Làm sạch chuỗi và loại bỏ các giá trị NaN
-    for col in ['ma_so_bhxh', 'ma_the_bhyt', 'ho_ten', 'cccd', 'sdt', 'email', 'dia_chi']:
-        df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        df[col] = df[col].where(~df[col].isin(['nan', 'None', 'NAT', 'NaT', '']), None)
+    # Chuẩn hóa mã BHXH, CCCD, SĐT và các chuỗi
+    df['ma_so_bhxh'] = df['ma_so_bhxh'].apply(lambda x: safe_clean_code(x, 50))
+    df['ma_the_bhyt'] = df['ma_the_bhyt'].apply(lambda x: safe_clean_str(x, 50))
+    df['ho_ten'] = df['ho_ten'].apply(lambda x: safe_clean_str(x))
+    df['cccd'] = df['cccd'].apply(lambda x: safe_clean_code(x, 50))
+    df['dia_chi'] = df['dia_chi'].apply(lambda x: safe_clean_str(x))
+    df['sdt'] = df['sdt'].apply(lambda x: safe_clean_phone(x, 100))
+    df['email'] = df['email'].apply(lambda x: safe_clean_str(x))
     
-    # Bỏ qua các dòng trống không có Mã số BHXH hoặc Họ tên
+    # Nếu Mã số BHXH đã chuyển thành 12 số (CCCD) mà cột CCCD đang trống thì tự động điền sang cột CCCD
+    mask_12_digits = df['ma_so_bhxh'].notnull() & (df['ma_so_bhxh'].str.len() == 12) & df['cccd'].isnull()
+    df.loc[mask_12_digits, 'cccd'] = df.loc[mask_12_digits, 'ma_so_bhxh']
+    
+    # Bỏ qua các dòng không có Mã số BHXH hoặc Họ tên
     df = df[df['ma_so_bhxh'].notnull() & df['ho_ten'].notnull()]
     df = df.drop_duplicates(subset=['ma_so_bhxh'], keep='first')
-    
-    # Nếu trong cùng file Excel có 2 Mã BHXH khác nhau nhưng bị nhập trùng số CCCD,
-    # giữ CCCD ở dòng đầu và tạm để trống CCCD ở dòng trùng để vẫn nạp được người đó vào hệ thống
-    mask_dup_cccd = df['cccd'].notnull() & df.duplicated(subset=['cccd'], keep='first')
-    df.loc[mask_dup_cccd, 'cccd'] = None
 
     conn = get_db_connection()
-    if not conn: return
-    
-    # Tự động mở rộng giới hạn ký tự các cột trong CSDL (phòng trường hợp SĐT ghi 2 số, có ghi chú hoặc Mã thẻ/CCCD dư ký tự)
-    try:
-        with conn.cursor() as alter_cur:
-            alter_cur.execute("""
-                ALTER TABLE participants 
-                    ALTER COLUMN ma_so_bhxh TYPE VARCHAR(50),
-                    ALTER COLUMN ma_the_bhyt TYPE VARCHAR(50),
-                    ALTER COLUMN cccd TYPE VARCHAR(50),
-                    ALTER COLUMN sdt TYPE VARCHAR(100);
-            """)
-        conn.commit()
-        max_len_15, max_len_12, max_len_sdt = 50, 50, 100
-    except Exception:
-        conn.rollback()
-        max_len_15, max_len_12, max_len_sdt = 15, 12, 15
-
-    # Cắt giới hạn an toàn để tuyệt đối không bao giờ xảy ra lỗi "value too long"
-    df['ma_so_bhxh'] = df['ma_so_bhxh'].apply(lambda x: x[:max_len_15] if x else None)
-    df['ma_the_bhyt'] = df['ma_the_bhyt'].apply(lambda x: x[:max_len_15] if x else None)
-    df['cccd'] = df['cccd'].apply(lambda x: x[:max_len_12] if x else None)
-    df['sdt'] = df['sdt'].apply(lambda x: x[:max_len_sdt] if x else None)
+    if not conn: 
+        return
 
     data = list(df[target].itertuples(index=False, name=None))
     if not data:
@@ -289,46 +389,50 @@ def import_db_logic(df, import_mode="MERGE"):
 
     try:
         cur = conn.cursor()
-        # Tạo bảng tạm dùng kiểu TEXT linh hoạt để không bị lỗi độ dài ký tự
         cur.execute("""
             CREATE TEMP TABLE temp_import (
-                ma_so_bhxh TEXT, ma_the_bhyt TEXT, ho_ten TEXT, 
-                ngay_sinh DATE, cccd TEXT, dia_chi TEXT, 
-                sdt TEXT, email TEXT, han_the DATE
-            ) ON COMMIT DELETE ROWS;
+                ma_so_bhxh VARCHAR(50), ma_the_bhyt VARCHAR(50), ho_ten TEXT, 
+                ngay_sinh DATE, cccd VARCHAR(50), dia_chi TEXT, 
+                sdt VARCHAR(100), email TEXT, han_the DATE
+            ) ON COMMIT DROP;
         """)
 
+        # Câu lệnh đồng bộ thông minh:
+        # Nếu trong DB đã có người tham gia với Mã BHXH 10 số (cũ) và số CCCD trùng với Mã BHXH 12 số (mới),
+        # hệ thống tự động nâng cấp Mã BHXH của người đó sang 12 số để gộp dữ liệu mà không tạo bản ghi trùng.
+        sync_10_to_12_sql = """
+            UPDATE participants p
+            SET ma_so_bhxh = t.ma_so_bhxh
+            FROM temp_import t
+            WHERE LENGTH(t.ma_so_bhxh) = 12
+              AND p.cccd = t.ma_so_bhxh
+              AND LENGTH(p.ma_so_bhxh) = 10
+              AND lower(unaccent(p.ho_ten)) = lower(unaccent(t.ho_ten))
+              AND NOT EXISTS (
+                  SELECT 1 FROM participants p2 WHERE p2.ma_so_bhxh = t.ma_so_bhxh
+              );
+        """
+
         if import_mode == "INSERT_ONLY":
-            # Chỉ thêm bản ghi có Mã BHXH chưa từng xuất hiện, giữ nguyên hoàn toàn dữ liệu cũ
             sql = """
                 INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
                 SELECT 
                     t.ma_so_bhxh, t.ma_the_bhyt, t.ho_ten, t.ngay_sinh,
-                    CASE 
-                        WHEN t.cccd IS NOT NULL AND EXISTS (
-                            SELECT 1 FROM participants p 
-                            WHERE p.cccd = t.cccd AND p.ma_so_bhxh <> t.ma_so_bhxh
-                        ) THEN NULL
-                        ELSE t.cccd
-                    END,
-                    t.dia_chi, t.sdt, t.email, t.han_the
+                    t.cccd, t.dia_chi, t.sdt, t.email, t.han_the
                 FROM temp_import t
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM participants p 
+                    WHERE p.ma_so_bhxh = t.ma_so_bhxh
+                       OR (t.cccd IS NOT NULL AND p.ma_so_bhxh = t.cccd)
+                )
                 ON CONFLICT (ma_so_bhxh) DO NOTHING;
             """
         else:
-            # Thêm người mới + Cập nhật thông minh (COALESCE giúp giữ lại thông tin cũ nếu ô trong file mới bị trống)
             sql = """
                 INSERT INTO participants (ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the)
                 SELECT 
                     t.ma_so_bhxh, t.ma_the_bhyt, t.ho_ten, t.ngay_sinh,
-                    CASE 
-                        WHEN t.cccd IS NOT NULL AND EXISTS (
-                            SELECT 1 FROM participants p 
-                            WHERE p.cccd = t.cccd AND p.ma_so_bhxh <> t.ma_so_bhxh
-                        ) THEN NULL
-                        ELSE t.cccd
-                    END,
-                    t.dia_chi, t.sdt, t.email, t.han_the
+                    t.cccd, t.dia_chi, t.sdt, t.email, t.han_the
                 FROM temp_import t
                 ON CONFLICT (ma_so_bhxh) DO UPDATE SET
                     ma_the_bhyt = COALESCE(EXCLUDED.ma_the_bhyt, participants.ma_the_bhyt),
@@ -345,7 +449,10 @@ def import_db_logic(df, import_mode="MERGE"):
         total_rows = len(data)
         for i in range(0, total_rows, 5000):
             batch = data[i:i + 5000]
+            cur.execute("TRUNCATE TABLE temp_import;")
             execute_values(cur, "INSERT INTO temp_import VALUES %s", batch)
+            if import_mode == "MERGE":
+                cur.execute(sync_10_to_12_sql)
             cur.execute(sql)
             conn.commit()
             yield min(i + 5000, total_rows), total_rows
@@ -355,11 +462,12 @@ def import_db_logic(df, import_mode="MERGE"):
     finally:
         conn.close()
 
-# --- 6. GIAO DIỆN CHÍNH ---
-
-if 'user' not in st.session_state: st.session_state.user = None
-if 'threshold' not in st.session_state: st.session_state.threshold = 0.85
-if 'search_results' not in st.session_state: st.session_state.search_results = None
+if 'user' not in st.session_state: 
+    st.session_state.user = None
+if 'threshold' not in st.session_state: 
+    st.session_state.threshold = 0.85
+if 'search_results' not in st.session_state: 
+    st.session_state.search_results = None
 
 if st.session_state.user is None:
     st.markdown("<h1 style='text-align: center; color: #1E88E5;'>🏥 V-BHYT Central Pro</h1>", unsafe_allow_html=True)
@@ -373,10 +481,10 @@ if st.session_state.user is None:
                     auth = login_user(email, pwd)
                     if auth:
                         st.session_state.user = auth.user
-                        log_activity("LOGIN", {"status": "success"}); st.rerun()
+                        log_activity("LOGIN", {"status": "success"})
+                        st.rerun()
     st.stop()
 
-# --- SIDEBAR ---
 st.sidebar.title("🛡️ V-BHYT PRO")
 st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
@@ -390,9 +498,9 @@ choice = st.sidebar.radio("Danh mục quản lý", menu_options, label_visibilit
 
 st.sidebar.markdown("---")
 if st.sidebar.button("🚪 Đăng xuất", use_container_width=True):
-    st.cache_data.clear(); st.session_state.clear(); logout_user()
-
-# --- NỘI DUNG ---
+    st.cache_data.clear()
+    st.session_state.clear()
+    logout_user()
 
 if choice == "📊 Dashboard":
     st.header("📊 Phân tích & Thống kê hệ thống")
@@ -405,22 +513,45 @@ if choice == "📊 Dashboard":
         c4.metric("Lượt tải dữ liệu", f"{stats.get('total_exports', 0):,}", delta="An ninh", delta_color="off")
         st.write("---")
         col1, col2 = st.columns(2)
-        with col1: st.plotly_chart(px.pie(pd.DataFrame({"Trạng thái": ["Còn hạn", "Hết hạn", "Sắp hạn"], "Số lượng": [stats['total']-stats['expired']-stats['expiring'], stats['expired'], stats['expiring']]}), values='Số lượng', names='Trạng thái', hole=0.4, title="📍 Tỷ lệ trạng thái thẻ BHYT"), use_container_width=True)
-        with col2: st.plotly_chart(px.bar(pd.DataFrame({"Loại": ["Đầy đủ", "Thiếu PII"], "Số lượng": [stats['total']-stats['incomplete'], stats['incomplete']]}), x="Loại", y="Số lượng", color="Loại", title="🛠️ Chất lượng dữ liệu"), use_container_width=True)
+        with col1: 
+            st.plotly_chart(
+                px.pie(
+                    pd.DataFrame({
+                        "Trạng thái": ["Còn hạn", "Hết hạn", "Sắp hạn"], 
+                        "Số lượng": [stats['total']-stats['expired']-stats['expiring'], stats['expired'], stats['expiring']]
+                    }), 
+                    values='Số lượng', names='Trạng thái', hole=0.4, title="📍 Tỷ lệ trạng thái thẻ BHYT"
+                ), 
+                use_container_width=True
+            )
+        with col2: 
+            st.plotly_chart(
+                px.bar(
+                    pd.DataFrame({
+                        "Loại": ["Đầy đủ", "Thiếu PII"], 
+                        "Số lượng": [stats['total']-stats['incomplete'], stats['incomplete']]
+                    }), 
+                    x="Loại", y="Số lượng", color="Loại", title="🛠️ Chất lượng dữ liệu"
+                ), 
+                use_container_width=True
+            )
 
 elif choice == "🔍 Tra cứu & Quá trình":
     st.header("🔍 Tra cứu người tham gia & Lịch sử BHXH")
     with st.expander("🛠️ Bộ lọc nâng cao", expanded=True):
         col1, col2, col3 = st.columns([2, 2, 1])
-        with col1: stype = st.selectbox("Loại tìm kiếm", ["Tên & Ngày sinh", "Mã BHXH", "CCCD"])
-        with col2: sfilter = st.selectbox("Trạng thái thẻ BHYT", ["Tất cả", "Còn hạn", "Sắp hết hạn (30 ngày)", "Đã hết hạn"])
-        with col3: slimit = st.number_input("Giới hạn", 10, 5000, 100)
+        with col1: 
+            stype = st.selectbox("Loại tìm kiếm", ["Tên & Ngày sinh", "Mã BHXH", "CCCD"])
+        with col2: 
+            sfilter = st.selectbox("Trạng thái thẻ BHYT", ["Tất cả", "Còn hạn", "Sắp hết hạn (30 ngày)", "Đã hết hạn"])
+        with col3: 
+            slimit = st.number_input("Giới hạn", 10, 5000, 100)
         c_m, c_s = st.columns([2, 1])
         if stype == "Tên & Ngày sinh":
             q_m = st.text_input("Họ tên")
             q_s = st.text_input("Ngày/Năm sinh")
         else:
-            q_m = st.text_input(f"Nhập {stype}")
+            q_m = st.text_input(f"Nhập {stype} (hỗ trợ mã 10 số hoặc CCCD 12 số)")
             q_s = ""
 
     if st.button("🚀 Thực hiện tra cứu", use_container_width=True):
@@ -429,32 +560,48 @@ elif choice == "🔍 Tra cứu & Quá trình":
 
     if st.session_state.search_results:
         rows = st.session_state.search_results
-        df_display = pd.DataFrame(rows, columns=["Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"])
-        def clean_fmt(x):
-            if pd.isna(x) or str(x).lower() in ['none', 'nan', 'nat', '']: return ""
-            return str(x)
-        for col in df_display.columns: df_display[col] = df_display[col].apply(clean_fmt)
+        df_display = pd.DataFrame(rows, columns=[
+            "Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", 
+            "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"
+        ])
         
-        # Giữ nguyên số CCCD đầy đủ, không che dấu ***
+        def clean_fmt(x):
+            if pd.isna(x) or str(x).lower() in ['none', 'nan', 'nat', '']: 
+                return ""
+            return str(x)
+            
+        for col in df_display.columns: 
+            df_display[col] = df_display[col].apply(clean_fmt)
+        
         for d_col in ["Ngày sinh", "Hạn thẻ"]:
             df_display[d_col] = pd.to_datetime(df_display[d_col], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
+            
         st.success(f"Tìm thấy {len(rows)} kết quả.")
         st.dataframe(df_display, use_container_width=True, hide_index=True)
+        
         st.write("---")
         st.subheader("📜 Xem quá trình BHXH chi tiết")
         options = [f"{r[2]} ({r[0]})" for r in rows]
         sel = st.selectbox("Chọn người tham gia cần xem lịch sử:", options=["-- Mời chọn --"] + options, key="selected_bhxh_person")
         if sel != "-- Mời chọn --":
             ms_sel = re.search(r"\((.*?)\)", sel).group(1)
+            # Lấy thêm CCCD của người được chọn để tra cứu chéo lịch sử BHXH nếu mã BHXH đã đổi sang 12 số
+            cccd_sel = next((str(r[4]).strip() for r in rows if str(r[0]).strip() == ms_sel and r[4]), "")
             conn = get_db_connection()
             if conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh FROM bhxh_history WHERE ma_so_bhxh = %s ORDER BY to_date(tu_thang, 'MM/YYYY') ASC", (ms_sel,))
+                    cur.execute("""
+                        SELECT tu_thang, den_thang, don_vi_cong_viec, muc_dong, ty_le_dong, loai_bh 
+                        FROM bhxh_history 
+                        WHERE ma_so_bhxh = %s OR (ma_so_bhxh = %s AND %s <> '')
+                        ORDER BY to_date(tu_thang, 'MM/YYYY') ASC
+                    """, (ms_sel, cccd_sel, cccd_sel))
                     h_rows = cur.fetchall()
                     if h_rows:
                         st.table(pd.DataFrame(h_rows, columns=["Từ tháng", "Đến tháng", "Đơn vị", "Mức đóng", "Tỷ lệ", "Loại"]).style.format({"Mức đóng": "{:,.0f}đ"}))
                         log_activity("VIEW_DETAIL", {"msbhxh": ms_sel})
-                    else: st.warning("Chưa có lịch sử chi tiết.")
+                    else: 
+                        st.warning("Chưa có lịch sử chi tiết.")
                 conn.close()
     elif st.session_state.search_results == []:
         st.warning("Không tìm thấy dữ liệu phù hợp.")
@@ -472,16 +619,24 @@ elif choice == "👥 Quản lý nhân sự":
             if st.button("🚀 Thực thi đổi mật khẩu"):
                 if target_email and new_p:
                     s, m = admin_manage_user(target_email, "RESET_PWD", new_p)
-                    if s: st.success(m); log_activity("ADMIN_RESET_PWD", {"target": target_email})
-                    else: st.error(m)
-                else: st.warning("Vui lòng điền đầy đủ email và mật khẩu mới.")
+                    if s: 
+                        st.success(m)
+                        log_activity("ADMIN_RESET_PWD", {"target": target_email})
+                    else: 
+                        st.error(m)
+                else: 
+                    st.warning("Vui lòng điền đầy đủ email và mật khẩu mới.")
         else:
             if st.button("🔴 Xác nhận XÓA tài khoản"):
                 if target_email:
                     s, m = admin_manage_user(target_email, "DELETE")
-                    if s: st.success(m); log_activity("ADMIN_DELETE_USER", {"target": target_email})
-                    else: st.error(m)
-                else: st.warning("Vui lòng nhập email cần xóa.")
+                    if s: 
+                        st.success(m)
+                        log_activity("ADMIN_DELETE_USER", {"target": target_email})
+                    else: 
+                        st.error(m)
+                else: 
+                    st.warning("Vui lòng nhập email cần xóa.")
                 
     with tab_add:
         with st.form("add_user_form"):
@@ -499,8 +654,10 @@ elif choice == "👥 Quản lý nhân sự":
                         })
                         st.success(f"✅ Đã tạo thành công tài khoản cho: {n_email}")
                         log_activity("ADMIN_CREATE_USER", {"target": n_email})
-                    except Exception as e: st.error(f"Lỗi: {e}")
-                else: st.warning("Vui lòng kiểm tra lại email và độ dài mật khẩu.")
+                    except Exception as e: 
+                        st.error(f"Lỗi: {e}")
+                else: 
+                    st.warning("Vui lòng kiểm tra lại email và độ dài mật khẩu.")
 
 elif choice == "🧮 Tiện ích tính toán":
     st.header("🧮 Công cụ hỗ trợ thu BHYT & BHXH")
@@ -509,8 +666,10 @@ elif choice == "🧮 Tiện ích tính toán":
         calc_exp = st.text_input("Nhập phép tính (VD: 105300 * 5)", placeholder="Nhấn Enter...")
         if calc_exp:
             try:
-                if all(c in set("0123456789+-*/.() ") for c in calc_exp): st.markdown(f"### Kết quả: `{eval(calc_exp):,.2f}`")
-            except: st.error("Lỗi tính toán.")
+                if all(c in set("0123456789+-*/.() ") for c in calc_exp): 
+                    st.markdown(f"### Kết quả: `{eval(calc_exp):,.2f}`")
+            except Exception: 
+                st.error("Lỗi tính toán.")
     with t2:
         num = st.number_input("Số người tham gia", 1, 10, 1)
         m1 = 2340000 * 0.045
@@ -529,11 +688,11 @@ elif choice == "📥 Nhập dữ liệu":
     st.header("📥 Nhập liệu hệ thống (Nạp cộng dồn an toàn)")
     tx, tp = st.tabs(["📊 File Excel (BHYT)", "📜 File PDF (Quá trình BHXH)"])
     with tx:
-        st.info("💡 **Cơ chế bảo vệ dữ liệu cũ:** Hệ thống chỉ nạp bổ sung dữ liệu từ file mới vào kho hiện tại, **tuyệt đối không xóa** các bản ghi cũ đã có trong hệ thống.")
+        st.info("💡 **Hỗ trợ đầy đủ:** File Excel chứa Mã số BHXH 10 số (cũ) hoặc 12 số (đã tích hợp CCCD mới). Dữ liệu cũ được bảo vệ nguyên vẹn.")
         mode_label = st.radio(
             "Chọn phương thức xử lý khi gặp Mã số BHXH đã có sẵn trong hệ thống:",
             [
-                "🔄 Bổ sung & Cập nhật thông minh (Thêm người mới; nếu trùng Mã BHXH thì cập nhật thông tin mới nhưng vẫn giữ lại SĐT/CCCD/Địa chỉ cũ nếu file mới bị trống)",
+                "🔄 Bổ sung & Cập nhật thông minh (Thêm người mới; nếu trùng Mã BHXH thì cập nhật thông tin mới nhưng giữ nguyên dữ liệu cũ nếu ô mới bị trống)",
                 "➕ Chỉ thêm người mới (Chỉ nạp các Mã BHXH chưa có trong hệ thống, bỏ qua hoàn toàn nếu đã tồn tại)"
             ]
         )
@@ -553,31 +712,38 @@ elif choice == "📥 Nhập dữ liệu":
                     txt.text(f"⏳ Đang nạp và đồng bộ: {processed:,} / {total:,} bản ghi...")
                 if processed > 0:
                     st.cache_data.clear()
-                    st.success(f"✅ Hoàn tất! Đã xử lý và nạp bổ sung thành công {processed:,} bản ghi vào hệ thống (dữ liệu cũ được bảo toàn).")
+                    st.success(f"✅ Hoàn tất! Đã xử lý và nạp thành công {processed:,} bản ghi vào hệ thống.")
                     log_activity("IMPORT_EXCEL", {"rows": len(df), "mode": import_mode})
-            except Exception as e: st.error(f"Lỗi đọc file: {e}")
+            except Exception as e: 
+                st.error(f"Lỗi đọc file: {e}")
     with tp:
         pdf_f = st.file_uploader("Chọn file PDF (Mẫu 07/SBH)", type=["pdf"])
         if pdf_f and st.button("🔍 Phân tích và Lưu"):
             with st.spinner("Đang đọc PDF..."):
                 ms, data, summ = parse_bhxh_pdf(pdf_f)
                 if ms and data and save_bhxh_history(ms, data, summ):
-                    st.cache_data.clear(); st.success(f"✅ Thành công Mã số: {ms}")
+                    st.cache_data.clear()
+                    st.success(f"✅ Thành công Mã số: {ms}")
                     log_activity("IMPORT_PDF", {"ms": ms, "rows": len(data)})
-                else: st.error("Lỗi hoặc không tìm thấy dữ liệu.")
+                else: 
+                    st.error("Lỗi hoặc không tìm thấy dữ liệu.")
 
 elif choice == "📜 Nhật ký hệ thống":
     st.header("📜 Nhật ký hoạt động")
     col1, col2 = st.columns([2, 1])
-    with col1: search_q = st.text_input("🔍 Tìm nhanh")
-    with col2: dr = st.date_input("Khoảng ngày", value=[date.today()-timedelta(days=7), date.today()])
+    with col1: 
+        search_q = st.text_input("🔍 Tìm nhanh")
+    with col2: 
+        dr = st.date_input("Khoảng ngày", value=[date.today()-timedelta(days=7), date.today()])
     conn = get_db_connection()
     if conn:
         df_l = pd.read_sql("SELECT created_at, email, action, details FROM audit_logs ORDER BY id DESC LIMIT 2000", conn)
         if not df_l.empty:
             df_l['created_at'] = pd.to_datetime(df_l['created_at']).dt.tz_convert('Asia/Ho_Chi_Minh')
-            if len(dr) == 2: df_l = df_l[(df_l['created_at'].dt.date >= dr[0]) & (df_l['created_at'].dt.date <= dr[1])]
-            if search_q: df_l = df_l[df_l.astype(str).apply(lambda row: row.str.contains(search_q, case=False).any(), axis=1)]
+            if len(dr) == 2: 
+                df_l = df_l[(df_l['created_at'].dt.date >= dr[0]) & (df_l['created_at'].dt.date <= dr[1])]
+            if search_q: 
+                df_l = df_l[df_l.astype(str).apply(lambda row: row.str.contains(search_q, case=False).any(), axis=1)]
             df_l['created_at'] = df_l['created_at'].dt.strftime('%H:%M:%S %d/%m/%Y')
             st.dataframe(df_l, use_container_width=True, hide_index=True)
         conn.close()
@@ -585,29 +751,47 @@ elif choice == "📜 Nhật ký hệ thống":
 elif choice == "🔧 Cấu hình":
     st.header("🔧 Cấu hình")
     st.session_state.threshold = st.slider("Độ nhạy tìm kiếm tên", 0.5, 0.95, st.session_state.threshold)
-    if st.button("Lưu"): st.cache_data.clear(); st.success("Đã lưu!")
+    if st.button("Lưu"): 
+        st.cache_data.clear()
+        st.success("Đã lưu!")
 
 elif choice == "🗑️ Dọn dẹp":
     st.header("🗑️ Quản lý & Dọn dẹp kho dữ liệu")
     with st.expander("📊 Dọn dẹp dữ liệu BHYT (Excel)", expanded=True):
         if st.checkbox("Tôi xác nhận xóa BHYT", key="del_bhyt") and st.button("🔴 XÓA BHYT"):
             conn = get_db_connection()
-            with conn.cursor() as cur: cur.execute("TRUNCATE TABLE participants RESTART IDENTITY")
-            conn.commit(); st.cache_data.clear(); st.success("Xong!"); time.sleep(1); st.rerun()
+            with conn.cursor() as cur: 
+                cur.execute("TRUNCATE TABLE participants RESTART IDENTITY")
+            conn.commit()
+            st.cache_data.clear()
+            st.success("Xong!")
+            time.sleep(1)
+            st.rerun()
     with st.expander("📜 Dọn dẹp dữ liệu BHXH (PDF)", expanded=True):
         if st.checkbox("Tôi xác nhận xóa lịch sử BHXH", key="del_bhxh") and st.button("🔴 XÓA LỊCH SỬ"):
             conn = get_db_connection()
-            with conn.cursor() as cur: cur.execute("TRUNCATE TABLE bhxh_history RESTART IDENTITY"); cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = NULL")
-            conn.commit(); st.cache_data.clear(); st.success("Xong!"); time.sleep(1); st.rerun()
+            with conn.cursor() as cur: 
+                cur.execute("TRUNCATE TABLE bhxh_history RESTART IDENTITY")
+                cur.execute("UPDATE participants SET tong_thoi_gian_bhxh = NULL")
+            conn.commit()
+            st.cache_data.clear()
+            st.success("Xong!")
+            time.sleep(1)
+            st.rerun()
     with st.expander("📜 Dọn dẹp Nhật ký", expanded=True):
         if st.checkbox("Tôi xác nhận xóa nhật ký", key="del_logs") and st.button("🔴 XÓA NHẬT KÝ"):
             conn = get_db_connection()
-            with conn.cursor() as cur: cur.execute("TRUNCATE TABLE audit_logs RESTART IDENTITY")
-            conn.commit(); st.success("Xong!"); time.sleep(1); st.rerun()
+            with conn.cursor() as cur: 
+                cur.execute("TRUNCATE TABLE audit_logs RESTART IDENTITY")
+            conn.commit()
+            st.success("Xong!")
+            time.sleep(1)
+            st.rerun()
 
 elif choice == "⚙️ Tài khoản":
     st.header("⚙️ Tài khoản")
     with st.form("p_form"):
         p1, p2 = st.text_input("Mật khẩu mới", type="password"), st.text_input("Xác nhận", type="password")
         if st.form_submit_button("Đổi mật khẩu") and p1 == p2 and len(p1) >= 6:
-            supabase.auth.update_user({"password": p1}); st.success("Thành công!")
+            supabase.auth.update_user({"password": p1})
+            st.success("Thành công!")
