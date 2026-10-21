@@ -297,9 +297,7 @@ def ensure_db_schema():
                 ALTER TABLE participants DROP CONSTRAINT IF EXISTS participants_cccd_key;
                 ALTER TABLE participants ADD COLUMN IF NOT EXISTS tong_thoi_gian_bhxh TEXT;
                 CREATE INDEX IF NOT EXISTS idx_cccd ON participants(cccd);
-            """)
-            cur.execute("""
-                ALTER TABLE bhxh_history 
+                ALTER TABLE IF EXISTS bhxh_history 
                     ALTER COLUMN ma_so_bhxh TYPE VARCHAR(50);
             """)
         conn.commit()
@@ -389,13 +387,6 @@ def import_db_logic(df, import_mode="MERGE"):
 
     try:
         cur = conn.cursor()
-        cur.execute("""
-            CREATE TEMP TABLE temp_import (
-                ma_so_bhxh VARCHAR(50), ma_the_bhyt VARCHAR(50), ho_ten TEXT, 
-                ngay_sinh DATE, cccd VARCHAR(50), dia_chi TEXT, 
-                sdt VARCHAR(100), email TEXT, han_the DATE
-            ) ON COMMIT DROP;
-        """)
 
         # Câu lệnh đồng bộ thông minh:
         # Nếu trong DB đã có người tham gia với Mã BHXH 10 số (cũ) và số CCCD trùng với Mã BHXH 12 số (mới),
@@ -405,9 +396,13 @@ def import_db_logic(df, import_mode="MERGE"):
             SET ma_so_bhxh = t.ma_so_bhxh
             FROM temp_import t
             WHERE LENGTH(t.ma_so_bhxh) = 12
-              AND p.cccd = t.ma_so_bhxh
-              AND LENGTH(p.ma_so_bhxh) = 10
-              AND lower(unaccent(p.ho_ten)) = lower(unaccent(t.ho_ten))
+              AND p.id = (
+                  SELECT p3.id FROM participants p3
+                  WHERE p3.cccd = t.ma_so_bhxh
+                    AND LENGTH(p3.ma_so_bhxh) = 10
+                    AND lower(unaccent(p3.ho_ten)) = lower(unaccent(t.ho_ten))
+                  LIMIT 1
+              )
               AND NOT EXISTS (
                   SELECT 1 FROM participants p2 WHERE p2.ma_so_bhxh = t.ma_so_bhxh
               );
@@ -449,7 +444,15 @@ def import_db_logic(df, import_mode="MERGE"):
         total_rows = len(data)
         for i in range(0, total_rows, 5000):
             batch = data[i:i + 5000]
-            cur.execute("TRUNCATE TABLE temp_import;")
+            # Tạo bảng tạm cho từng lô 5.000 dòng vì ON COMMIT DROP sẽ tự xóa bảng sau mỗi lần commit()
+            cur.execute("""
+                CREATE TEMP TABLE IF NOT EXISTS temp_import (
+                    ma_so_bhxh VARCHAR(50), ma_the_bhyt VARCHAR(50), ho_ten TEXT, 
+                    ngay_sinh DATE, cccd VARCHAR(50), dia_chi TEXT, 
+                    sdt VARCHAR(100), email TEXT, han_the DATE
+                ) ON COMMIT DROP;
+                TRUNCATE TABLE temp_import;
+            """)
             execute_values(cur, "INSERT INTO temp_import VALUES %s", batch)
             if import_mode == "MERGE":
                 cur.execute(sync_10_to_12_sql)
