@@ -159,6 +159,92 @@ def get_advanced_stats():
     finally: 
         conn.close()
 
+@st.cache_data(ttl=300)
+def get_missing_cccd_data():
+    """
+    Thống kê và phân loại người tham gia có Mã số BHXH 10 số nhưng thiếu số CCCD:
+    - Nhóm 1 (active_rows): Còn hạn thẻ BHYT (han_the >= CURRENT_DATE) -> Giữ lại để phối hợp UBND/Công an xã.
+    - Nhóm 2 (expired_rows): Đã hết hạn thẻ BHYT hoặc không có hạn thẻ -> Dữ liệu lỗi/ảo cần kiểm tra và xóa.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return [], []
+    try:
+        with conn.cursor() as cur:
+            fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
+            base_cond = """
+                LENGTH(TRIM(ma_so_bhxh)) <= 10
+                AND (cccd IS NULL OR TRIM(cccd) = '' OR LOWER(TRIM(cccd)) IN ('nan', 'none', 'null', 'nat'))
+            """
+            # 1. Nhóm còn hạn thẻ BHYT (Không xóa - Xuất phối hợp UBND xã / Công an xã)
+            cur.execute(f"""
+                SELECT {fields} FROM participants
+                WHERE {base_cond} AND han_the >= CURRENT_DATE
+                ORDER BY dia_chi ASC, ho_ten ASC
+            """)
+            active_rows = cur.fetchall()
+
+            # 2. Nhóm đã hết hạn thẻ hoặc không có hạn thẻ (Dữ liệu lỗi - Cho phép xuất kiểm tra & xóa)
+            cur.execute(f"""
+                SELECT {fields} FROM participants
+                WHERE {base_cond} AND (han_the < CURRENT_DATE OR han_the IS NULL)
+                ORDER BY han_the DESC NULLS LAST, ho_ten ASC
+            """)
+            expired_rows = cur.fetchall()
+            return active_rows, expired_rows
+    except Exception:
+        return [], []
+    finally:
+        conn.close()
+
+def delete_expired_missing_cccd():
+    """
+    Chỉ xóa các bản ghi có Mã BHXH 10 số, thiếu CCCD VÀ đã hết hạn thẻ (hoặc không có hạn thẻ).
+    Bảo vệ tuyệt đối các trường hợp còn hạn thẻ BHYT (han_the >= CURRENT_DATE).
+    """
+    conn = get_db_connection()
+    if not conn:
+        return False, 0, "Không thể kết nối cơ sở dữ liệu."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM participants
+                WHERE LENGTH(TRIM(ma_so_bhxh)) <= 10
+                  AND (cccd IS NULL OR TRIM(cccd) = '' OR LOWER(TRIM(cccd)) IN ('nan', 'none', 'null', 'nat'))
+                  AND (han_the < CURRENT_DATE OR han_the IS NULL)
+            """)
+            deleted_count = cur.rowcount
+        conn.commit()
+        return True, deleted_count, f"Đã xóa thành công {deleted_count:,} bản ghi lỗi (10 số, thiếu CCCD, hết hạn thẻ)."
+    except Exception as e:
+        conn.rollback()
+        return False, 0, f"Lỗi khi xóa dữ liệu: {e}"
+    finally:
+        conn.close()
+
+def format_participants_df(rows):
+    """Chuẩn hóa danh sách người tham gia sang DataFrame sạch để hiển thị và xuất Excel"""
+    df = pd.DataFrame(rows, columns=[
+        "Mã số BHXH", "Mã thẻ BHYT", "Họ tên", "Ngày sinh", "CCCD", 
+        "Địa chỉ", "Số điện thoại", "Email", "Hạn thẻ", "Tổng quá trình"
+    ])
+    def clean_cell(x):
+        if pd.isna(x) or str(x).strip().lower() in ['none', 'nan', 'nat', 'null', '']:
+            return ""
+        return str(x).strip()
+    for col in df.columns:
+        df[col] = df[col].apply(clean_cell)
+    for d_col in ["Ngày sinh", "Hạn thẻ"]:
+        df[d_col] = pd.to_datetime(df[d_col], errors='coerce').dt.strftime('%d/%m/%Y').fillna("")
+    return df
+
+def convert_df_to_excel(df, sheet_name="Danh_Sach"):
+    """Chuyển đổi DataFrame sang file Excel (.xlsx) trong bộ nhớ để tải về"""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return output.getvalue()
+
 def parse_bhxh_pdf(pdf_file):
     """Trích xuất dữ liệu từ file PDF quá trình đóng BHXH (Mẫu 07/SBH) và lọc trùng"""
     history_data, seen_records = [], set()
@@ -493,7 +579,7 @@ st.sidebar.markdown(f"👤 **{st.session_state.user.email}**")
 role_label = "🔴 Quản trị viên" if is_admin() else "🔵 Nhân viên Tra cứu"
 st.sidebar.caption(role_label)
 
-menu_options = ["📊 Dashboard", "🔍 Tra cứu & Quá trình", "🧮 Tiện ích tính toán", "⚙️ Tài khoản"]
+menu_options = ["📊 Dashboard", "🔍 Tra cứu & Quá trình", "🧹 Rà soát thiếu CCCD", "🧮 Tiện ích tính toán", "⚙️ Tài khoản"]
 if is_admin():
     menu_options += ["📥 Nhập dữ liệu", "📜 Nhật ký hệ thống", "👥 Quản lý nhân sự", "🔧 Cấu hình", "🗑️ Dọn dẹp"]
 
@@ -608,6 +694,104 @@ elif choice == "🔍 Tra cứu & Quá trình":
                 conn.close()
     elif st.session_state.search_results == []:
         st.warning("Không tìm thấy dữ liệu phù hợp.")
+
+elif choice == "🧹 Rà soát thiếu CCCD":
+    st.header("🧹 Rà soát Mã BHXH 10 số thiếu CCCD & Làm sạch dữ liệu")
+    st.markdown(
+        "Công cụ giúp thống kê các trường hợp **có Mã số BHXH (10 số) nhưng chưa có số CCCD**, "
+        "tự động phân tách riêng nhóm **Còn hạn thẻ BHYT** (để phối hợp UBND xã, Công an xã) "
+        "và nhóm **Đã hết hạn thẻ / Dữ liệu lỗi** (để kiểm tra và xóa khỏi hệ thống)."
+    )
+
+    if st.button("🔄 Làm mới số liệu thống kê", use_container_width=False):
+        st.cache_data.clear()
+
+    with st.spinner("Đang rà soát và phân loại kho dữ liệu..."):
+        active_missing_rows, expired_missing_rows = get_missing_cccd_data()
+
+    total_missing = len(active_missing_rows) + len(expired_missing_rows)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Tổng Mã 10 số thiếu CCCD", f"{total_missing:,} người")
+    c2.metric(
+        "🟢 Còn hạn thẻ BHYT (Giữ lại)", 
+        f"{len(active_missing_rows):,} người", 
+        delta="Phối hợp UBND / Công an xã", 
+        delta_color="normal"
+    )
+    c3.metric(
+        "🔴 Hết hạn / Không hạn thẻ (Dữ liệu lỗi)", 
+        f"{len(expired_missing_rows):,} người", 
+        delta="Cần kiểm tra & xóa", 
+        delta_color="inverse"
+    )
+
+    st.write("---")
+    tab_keep, tab_clean = st.tabs([
+        f"🟢 1. Còn hạn thẻ BHYT - Phối hợp Xã/Công an ({len(active_missing_rows):,})",
+        f"🔴 2. Dữ liệu lỗi / Đã hết hạn thẻ - Kiểm tra & Xóa ({len(expired_missing_rows):,})"
+    ])
+
+    with tab_keep:
+        st.info(
+            "🛡️ **NGUYÊN TẮC BẢO VỆ:** Những trường hợp dưới đây chưa có số CCCD nhưng **Hạn thẻ BHYT vẫn còn hiệu lực**. "
+            "Hệ thống **KHÔNG XÓA** những người này. Bạn hãy xuất file Excel để gửi UBND xã, Công an xã phối hợp rà soát và bổ sung số định danh cá nhân (CCCD)."
+        )
+        if active_missing_rows:
+            df_active_missing = format_participants_df(active_missing_rows)
+            excel_active = convert_df_to_excel(df_active_missing, sheet_name="ConHan_ThieuCCCD")
+            st.download_button(
+                label=f"📥 Xuất Excel danh sách phối hợp UBND & Công an xã ({len(active_missing_rows):,} người)",
+                data=excel_active,
+                file_name=f"DS_ConHanBHYT_ThieuCCCD_PhoiHopXa_{date.today().strftime('%d%m%Y')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                on_click=lambda: log_activity("EXPORT", {"type": "ACTIVE_MISSING_CCCD", "count": len(active_missing_rows)})
+            )
+            st.dataframe(df_active_missing, use_container_width=True, hide_index=True)
+        else:
+            st.success("🎉 Tuyệt vời! Không có trường hợp nào đang còn hạn thẻ BHYT mà bị thiếu số CCCD.")
+
+    with tab_clean:
+        st.warning(
+            "⚠️ **DỮ LIỆU LỖI / THẺ HẾT HẠN:** Đây là các bản ghi có Mã BHXH 10 số, **không có số CCCD** và **hạn thẻ BHYT đã hết hạn (hoặc trống)**. "
+            "Bạn nên bấm **Xuất Excel** để lưu kiểm tra trước, sau đó có thể xóa khỏi hệ thống để kho dữ liệu chỉ còn lại người tham gia hợp lệ."
+        )
+        if expired_missing_rows:
+            df_expired_missing = format_participants_df(expired_missing_rows)
+            excel_expired = convert_df_to_excel(df_expired_missing, sheet_name="DuLieuLoi_ThieuCCCD")
+            st.download_button(
+                label=f"📥 Bước 1: Xuất Excel dữ liệu lỗi để kiểm tra ({len(expired_missing_rows):,} bản ghi)",
+                data=excel_expired,
+                file_name=f"DS_DuLieuLoi_10So_KhongCCCD_HetHan_{date.today().strftime('%d%m%Y')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                on_click=lambda: log_activity("EXPORT", {"type": "EXPIRED_MISSING_CCCD", "count": len(expired_missing_rows)})
+            )
+            st.dataframe(df_expired_missing, use_container_width=True, hide_index=True)
+
+            if is_admin():
+                st.write("---")
+                st.subheader("🗑️ Bước 2: Xóa dữ liệu lỗi khỏi hệ thống")
+                st.markdown(
+                    f"- **Số bản ghi sẽ bị xóa:** `{len(expired_missing_rows):,}` bản ghi (Mã 10 số + Không có CCCD + Đã hết hạn thẻ / Không có hạn thẻ).\n"
+                    f"- **Số bản ghi được giữ nguyên an toàn:** Toàn bộ người đã có CCCD và `{len(active_missing_rows):,}` người thiếu CCCD nhưng **còn hạn thẻ BHYT**."
+                )
+                confirm_clean = st.checkbox(
+                    f"Tôi đã xuất file Excel kiểm tra và xác nhận xóa {len(expired_missing_rows):,} bản ghi dữ liệu lỗi này khỏi hệ thống",
+                    key="confirm_del_missing_cccd"
+                )
+                if confirm_clean and st.button("🔴 XÓA DỮ LIỆU LỖI (THIẾU CCCD & HẾT HẠN THẺ)", use_container_width=True):
+                    ok, deleted_cnt, msg = delete_expired_missing_cccd()
+                    if ok:
+                        log_activity("CLEAN_INVALID_NO_CCCD", {"deleted_rows": deleted_cnt, "kept_active_rows": len(active_missing_rows)})
+                        st.cache_data.clear()
+                        st.success(f"✅ {msg}")
+                        time.sleep(1.5)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        else:
+            st.success("🎉 Hệ thống đã sạch sẽ! Không còn bản ghi lỗi (Mã 10 số thiếu CCCD và đã hết hạn thẻ) nào trong kho dữ liệu.")
 
 elif choice == "👥 Quản lý nhân sự":
     st.header("👥 Quản lý nhân sự & Phân quyền")
