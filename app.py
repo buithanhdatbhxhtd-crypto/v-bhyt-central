@@ -159,10 +159,133 @@ def get_advanced_stats():
     finally: 
         conn.close()
 
-@st.cache_data(ttl=300)
-def get_missing_cccd_data():
+@st.cache_data(ttl=60)
+def get_db_diagnostic_summary():
     """
-    Thống kê và phân loại người tham gia có Mã số BHXH 10 số nhưng thiếu số CCCD:
+    Chẩn đoán tổng thể kho dữ liệu hiện tại để người dùng biết chính xác:
+    - Tổng số bản ghi hiện có trong hệ thống
+    - Bao nhiêu mã 12 số, bao nhiêu mã 10 số
+    - Bao nhiêu mã 10 số trống CCCD hoàn toàn, bao nhiêu mã 10 số có CMND 9 số / CCCD sai định dạng (< 12 số)
+    - Bao nhiêu mã 10 số bị trùng với người đã có mã 12 số mới
+    """
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE LENGTH(TRIM(ma_so_bhxh)) >= 12) AS bhxh_12,
+                    COUNT(*) FILTER (WHERE LENGTH(TRIM(ma_so_bhxh)) <= 10) AS bhxh_10,
+                    COUNT(*) FILTER (
+                        WHERE LENGTH(TRIM(ma_so_bhxh)) <= 10
+                        AND LENGTH(REGEXP_REPLACE(COALESCE(cccd, ''), '[^0-9]', '', 'g')) = 12
+                        AND REGEXP_REPLACE(COALESCE(cccd, ''), '[0\\s]', '', 'g') <> ''
+                    ) AS bhxh_10_valid_cccd,
+                    COUNT(*) FILTER (
+                        WHERE LENGTH(TRIM(ma_so_bhxh)) <= 10
+                        AND (
+                            cccd IS NULL 
+                            OR TRIM(cccd) = '' 
+                            OR LOWER(TRIM(cccd)) IN ('nan', 'none', 'null', 'nat')
+                            OR REGEXP_REPLACE(COALESCE(cccd, ''), '[0\\s\\-\\.]', '', 'g') = ''
+                        )
+                    ) AS bhxh_10_empty_cccd,
+                    COUNT(*) FILTER (
+                        WHERE LENGTH(TRIM(ma_so_bhxh)) <= 10
+                        AND cccd IS NOT NULL 
+                        AND TRIM(cccd) <> ''
+                        AND LOWER(TRIM(cccd)) NOT IN ('nan', 'none', 'null', 'nat')
+                        AND REGEXP_REPLACE(COALESCE(cccd, ''), '[0\\s\\-\\.]', '', 'g') <> ''
+                        AND LENGTH(REGEXP_REPLACE(COALESCE(cccd, ''), '[^0-9]', '', 'g')) <> 12
+                    ) AS bhxh_10_invalid_cccd,
+                    COUNT(*) FILTER (
+                        WHERE LENGTH(TRIM(ma_so_bhxh)) <= 10
+                        AND EXISTS (
+                            SELECT 1 FROM participants p2
+                            WHERE p2.id <> participants.id
+                              AND LENGTH(TRIM(p2.ma_so_bhxh)) >= 12
+                              AND (
+                                  (participants.cccd IS NOT NULL AND TRIM(participants.cccd) <> '' AND p2.ma_so_bhxh = TRIM(participants.cccd))
+                                  OR (
+                                      p2.ho_ten_unsigned = participants.ho_ten_unsigned
+                                      AND p2.ngay_sinh IS NOT NULL 
+                                      AND p2.ngay_sinh = participants.ngay_sinh
+                                  )
+                              )
+                        )
+                    ) AS bhxh_10_dup_with_12
+                FROM participants;
+            """)
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                'total': row[0],
+                'bhxh_12': row[1],
+                'bhxh_10': row[2],
+                'bhxh_10_valid_cccd': row[3],
+                'bhxh_10_empty_cccd': row[4],
+                'bhxh_10_invalid_cccd': row[5],
+                'bhxh_10_dup_with_12': row[6]
+            }
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+def build_review_condition(review_mode):
+    """Xây dựng điều kiện SQL tương ứng với chế độ rà soát mà người dùng chọn"""
+    if review_mode == "EMPTY_ONLY":
+        # Chỉ những bản ghi Mã 10 số trống hoàn toàn CCCD hoặc CCCD toàn số 0
+        return """
+            LENGTH(TRIM(ma_so_bhxh)) <= 10
+            AND (
+                cccd IS NULL 
+                OR TRIM(cccd) = '' 
+                OR LOWER(TRIM(cccd)) IN ('nan', 'none', 'null', 'nat')
+                OR REGEXP_REPLACE(COALESCE(cccd, ''), '[0\\s\\-\\.]', '', 'g') = ''
+            )
+        """
+    elif review_mode == "DUP_10_12":
+        # Những bản ghi Mã 10 số bị thừa vì người đó đã có bản ghi Mã 12 số (trùng CCCD hoặc trùng Họ tên + Ngày sinh)
+        return """
+            LENGTH(TRIM(ma_so_bhxh)) <= 10
+            AND EXISTS (
+                SELECT 1 FROM participants p2
+                WHERE p2.id <> participants.id
+                  AND LENGTH(TRIM(p2.ma_so_bhxh)) >= 12
+                  AND (
+                      (participants.cccd IS NOT NULL AND TRIM(participants.cccd) <> '' AND p2.ma_so_bhxh = TRIM(participants.cccd))
+                      OR (
+                          p2.ho_ten_unsigned = participants.ho_ten_unsigned
+                          AND p2.ngay_sinh IS NOT NULL 
+                          AND p2.ngay_sinh = participants.ngay_sinh
+                      )
+                  )
+            )
+        """
+    elif review_mode == "ALL_10_DIGITS":
+        # Tất cả các bản ghi có Mã số BHXH vẫn đang là 10 số (chưa chuyển Mã số BHXH thành 12 số CCCD)
+        return "LENGTH(TRIM(ma_so_bhxh)) <= 10"
+    else:
+        # Mặc định (EMPTY_OR_INVALID): Mã 10 số nhưng trống CCCD, CCCD = 0, hoặc CMND 9 số cũ / không đủ 12 chữ số CCCD
+        return """
+            LENGTH(TRIM(ma_so_bhxh)) <= 10
+            AND (
+                cccd IS NULL 
+                OR TRIM(cccd) = '' 
+                OR LOWER(TRIM(cccd)) IN ('nan', 'none', 'null', 'nat')
+                OR REGEXP_REPLACE(COALESCE(cccd, ''), '[0\\s\\-\\.]', '', 'g') = ''
+                OR LENGTH(REGEXP_REPLACE(COALESCE(cccd, ''), '[^0-9]', '', 'g')) <> 12
+            )
+        """
+
+@st.cache_data(ttl=60)
+def get_missing_cccd_data(review_mode="EMPTY_OR_INVALID"):
+    """
+    Thống kê và phân loại người tham gia theo chế độ rà soát:
     - Nhóm 1 (active_rows): Còn hạn thẻ BHYT (han_the >= CURRENT_DATE) -> Giữ lại để phối hợp UBND/Công an xã.
     - Nhóm 2 (expired_rows): Đã hết hạn thẻ BHYT hoặc không có hạn thẻ -> Dữ liệu lỗi/ảo cần kiểm tra và xóa.
     """
@@ -172,14 +295,11 @@ def get_missing_cccd_data():
     try:
         with conn.cursor() as cur:
             fields = "ma_so_bhxh, ma_the_bhyt, ho_ten, ngay_sinh, cccd, dia_chi, sdt, email, han_the, tong_thoi_gian_bhxh"
-            base_cond = """
-                LENGTH(TRIM(ma_so_bhxh)) <= 10
-                AND (cccd IS NULL OR TRIM(cccd) = '' OR LOWER(TRIM(cccd)) IN ('nan', 'none', 'null', 'nat'))
-            """
+            base_cond = build_review_condition(review_mode)
             # 1. Nhóm còn hạn thẻ BHYT (Không xóa - Xuất phối hợp UBND xã / Công an xã)
             cur.execute(f"""
                 SELECT {fields} FROM participants
-                WHERE {base_cond} AND han_the >= CURRENT_DATE
+                WHERE ({base_cond}) AND han_the >= CURRENT_DATE
                 ORDER BY dia_chi ASC, ho_ten ASC
             """)
             active_rows = cur.fetchall()
@@ -187,7 +307,7 @@ def get_missing_cccd_data():
             # 2. Nhóm đã hết hạn thẻ hoặc không có hạn thẻ (Dữ liệu lỗi - Cho phép xuất kiểm tra & xóa)
             cur.execute(f"""
                 SELECT {fields} FROM participants
-                WHERE {base_cond} AND (han_the < CURRENT_DATE OR han_the IS NULL)
+                WHERE ({base_cond}) AND (han_the < CURRENT_DATE OR han_the IS NULL)
                 ORDER BY han_the DESC NULLS LAST, ho_ten ASC
             """)
             expired_rows = cur.fetchall()
@@ -197,25 +317,25 @@ def get_missing_cccd_data():
     finally:
         conn.close()
 
-def delete_expired_missing_cccd():
+def delete_expired_missing_cccd(review_mode="EMPTY_OR_INVALID"):
     """
-    Chỉ xóa các bản ghi có Mã BHXH 10 số, thiếu CCCD VÀ đã hết hạn thẻ (hoặc không có hạn thẻ).
+    Chỉ xóa các bản ghi thuộc nhóm rà soát đã chọn VÀ đã hết hạn thẻ (hoặc không có hạn thẻ).
     Bảo vệ tuyệt đối các trường hợp còn hạn thẻ BHYT (han_the >= CURRENT_DATE).
     """
     conn = get_db_connection()
     if not conn:
         return False, 0, "Không thể kết nối cơ sở dữ liệu."
     try:
+        base_cond = build_review_condition(review_mode)
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""
                 DELETE FROM participants
-                WHERE LENGTH(TRIM(ma_so_bhxh)) <= 10
-                  AND (cccd IS NULL OR TRIM(cccd) = '' OR LOWER(TRIM(cccd)) IN ('nan', 'none', 'null', 'nat'))
+                WHERE ({base_cond})
                   AND (han_the < CURRENT_DATE OR han_the IS NULL)
             """)
             deleted_count = cur.rowcount
         conn.commit()
-        return True, deleted_count, f"Đã xóa thành công {deleted_count:,} bản ghi lỗi (10 số, thiếu CCCD, hết hạn thẻ)."
+        return True, deleted_count, f"Đã xóa thành công {deleted_count:,} bản ghi lỗi (hết hạn thẻ) theo tiêu chí đã chọn."
     except Exception as e:
         conn.rollback()
         return False, 0, f"Lỗi khi xóa dữ liệu: {e}"
@@ -321,7 +441,7 @@ def safe_clean_str(val, max_len=None):
     return s[:max_len] if max_len else s
 
 def safe_clean_code(val, max_len=50):
-    """Chuẩn hóa Mã số BHXH (10 số hoặc 12 số CCCD) và số CCCD, tự động khôi phục số 0 ở đầu nếu bị Excel làm mất"""
+    """Chuẩn hóa Mã số BHXH (10 số hoặc 12 số CCCD), tự động khôi phục số 0 ở đầu nếu bị Excel làm mất"""
     s = safe_clean_str(val, max_len)
     if not s:
         return None
@@ -330,6 +450,17 @@ def safe_clean_code(val, max_len=50):
             s = '0' + s  # Khôi phục số 0 đầu cho Mã BHXH 10 số
         elif len(s) == 11:
             s = '0' + s  # Khôi phục số 0 đầu cho Mã BHXH / CCCD 12 số
+    return s
+
+def safe_clean_cccd(val, max_len=50):
+    """Chuẩn hóa riêng cho cột CCCD: loại bỏ các giá trị toàn số 0 ảo, khôi phục số 0 đầu cho CCCD 11 số nhưng giữ nguyên CMND 9 số để dễ phát hiện"""
+    s = safe_clean_str(val, max_len)
+    if not s:
+        return None
+    if re.sub(r'[0\s\-\.]', '', s) == '':
+        return None
+    if s.isdigit() and len(s) == 11:
+        s = '0' + s  # Khôi phục số 0 đầu cho CCCD 12 số bị mất số 0
     return s
 
 def safe_clean_phone(val, max_len=100):
@@ -449,7 +580,7 @@ def import_db_logic(df, import_mode="MERGE"):
     df['ma_so_bhxh'] = df['ma_so_bhxh'].apply(lambda x: safe_clean_code(x, 50))
     df['ma_the_bhyt'] = df['ma_the_bhyt'].apply(lambda x: safe_clean_str(x, 50))
     df['ho_ten'] = df['ho_ten'].apply(lambda x: safe_clean_str(x))
-    df['cccd'] = df['cccd'].apply(lambda x: safe_clean_code(x, 50))
+    df['cccd'] = df['cccd'].apply(lambda x: safe_clean_cccd(x, 50))
     df['dia_chi'] = df['dia_chi'].apply(lambda x: safe_clean_str(x))
     df['sdt'] = df['sdt'].apply(lambda x: safe_clean_phone(x, 100))
     df['email'] = df['email'].apply(lambda x: safe_clean_str(x))
@@ -697,21 +828,55 @@ elif choice == "🔍 Tra cứu & Quá trình":
 
 elif choice == "🧹 Rà soát thiếu CCCD":
     st.header("🧹 Rà soát Mã BHXH 10 số thiếu CCCD & Làm sạch dữ liệu")
-    st.markdown(
-        "Công cụ giúp thống kê các trường hợp **có Mã số BHXH (10 số) nhưng chưa có số CCCD**, "
-        "tự động phân tách riêng nhóm **Còn hạn thẻ BHYT** (để phối hợp UBND xã, Công an xã) "
-        "và nhóm **Đã hết hạn thẻ / Dữ liệu lỗi** (để kiểm tra và xóa khỏi hệ thống)."
-    )
 
     if st.button("🔄 Làm mới số liệu thống kê", use_container_width=False):
         st.cache_data.clear()
 
+    diag = get_db_diagnostic_summary()
+    if diag:
+        with st.expander("📊 Bảng Chẩn đoán toàn bộ Kho dữ liệu hiện tại (Xem chi tiết vì sao số lượng ít/nhiều)", expanded=True):
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("📦 Tổng bản ghi trong kho", f"{diag['total']:,}")
+            d2.metric("🆔 Mã BHXH 12 số (Đã đồng bộ)", f"{diag['bhxh_12']:,}")
+            d3.metric("🔟 Mã BHXH 10 số (Mã cũ)", f"{diag['bhxh_10']:,}")
+            d4.metric("👥 Mã 10 số trùng người Mã 12 số", f"{diag['bhxh_10_dup_with_12']:,}")
+
+            st.markdown(
+                f"- **Chi tiết trong `{diag['bhxh_10']:,}` bản ghi có Mã BHXH 10 số hiện đang nằm trong kho:**\n"
+                f"  + ✅ **Đã có số CCCD 12 số ở cột CCCD (`socmnd`):** `{diag['bhxh_10_valid_cccd']:,}` người *(Do khi nạp file mới có cột `socmnd`, hệ thống đã tự động lấy số CCCD từ file mới điền bổ sung cho các Mã 10 số cũ trùng mã)*.\n"
+                f"  + ❌ **Trống hoàn toàn số CCCD (hoặc bằng 0):** `{diag['bhxh_10_empty_cccd']:,}` người.\n"
+                f"  + ⚠️ **Đang dùng CMND 9 số cũ / CCCD sai định dạng (không đủ 12 số):** `{diag['bhxh_10_invalid_cccd']:,}` người.\n"
+                f"  + 🔄 **Bản ghi 10 số bị dư thừa (do người này đã có thêm 1 dòng Mã BHXH 12 số mới):** `{diag['bhxh_10_dup_with_12']:,}` người."
+            )
+            st.caption(
+                "💡 Lưu ý: Nếu bạn từng bấm '🔴 XÓA BHYT' ở mục Dọn dẹp trước đây rồi mới nạp file `aaa.xlsb` (hoặc lần nạp vừa rồi mới vào 5.000 dòng đầu), "
+                "thì các bản ghi của file cũ (chỉ có Mã 10 số, không có trong file mới) đã bị xóa lúc dọn dẹp hoặc chưa được nạp lại."
+            )
+
+    mode_choice = st.radio(
+        "🎯 Chọn tiêu chí rà soát dữ liệu Mã BHXH 10 số:",
+        [
+            "🔍 1. Mã 10 số Trống CCCD hoặc CCCD chưa chuẩn (Gồm: Trống CCCD + CCCD bằng 0 + CMND 9 số cũ chưa đủ 12 số)",
+            "❌ 2. Chỉ những người Mã 10 số Trống hoàn toàn cột CCCD",
+            "👥 3. Bản ghi Mã 10 số bị trùng dư thừa (Người tham gia đã có bản ghi Mã BHXH 12 số mới trong kho)",
+            "🔟 4. Toàn bộ người tham gia có Mã số BHXH vẫn đang là 10 số (Chưa chuyển Mã số BHXH sang 12 số)"
+        ]
+    )
+    if "1." in mode_choice:
+        review_mode = "EMPTY_OR_INVALID"
+    elif "2." in mode_choice:
+        review_mode = "EMPTY_ONLY"
+    elif "3." in mode_choice:
+        review_mode = "DUP_10_12"
+    else:
+        review_mode = "ALL_10_DIGITS"
+
     with st.spinner("Đang rà soát và phân loại kho dữ liệu..."):
-        active_missing_rows, expired_missing_rows = get_missing_cccd_data()
+        active_missing_rows, expired_missing_rows = get_missing_cccd_data(review_mode)
 
     total_missing = len(active_missing_rows) + len(expired_missing_rows)
     c1, c2, c3 = st.columns(3)
-    c1.metric("Tổng Mã 10 số thiếu CCCD", f"{total_missing:,} người")
+    c1.metric("Tổng hồ sơ theo tiêu chí chọn", f"{total_missing:,} người")
     c2.metric(
         "🟢 Còn hạn thẻ BHYT (Giữ lại)", 
         f"{len(active_missing_rows):,} người", 
@@ -733,8 +898,8 @@ elif choice == "🧹 Rà soát thiếu CCCD":
 
     with tab_keep:
         st.info(
-            "🛡️ **NGUYÊN TẮC BẢO VỆ:** Những trường hợp dưới đây chưa có số CCCD nhưng **Hạn thẻ BHYT vẫn còn hiệu lực**. "
-            "Hệ thống **KHÔNG XÓA** những người này. Bạn hãy xuất file Excel để gửi UBND xã, Công an xã phối hợp rà soát và bổ sung số định danh cá nhân (CCCD)."
+            "🛡️ **NGUYÊN TẮC BẢO VỆ:** Những trường hợp dưới đây thuộc diện rà soát nhưng **Hạn thẻ BHYT vẫn còn hiệu lực**. "
+            "Hệ thống **KHÔNG XÓA** những người này. Bạn hãy xuất file Excel để gửi UBND xã, Công an xã phối hợp rà soát và bổ sung/đồng bộ số định danh cá nhân (CCCD)."
         )
         if active_missing_rows:
             df_active_missing = format_participants_df(active_missing_rows)
@@ -742,30 +907,30 @@ elif choice == "🧹 Rà soát thiếu CCCD":
             st.download_button(
                 label=f"📥 Xuất Excel danh sách phối hợp UBND & Công an xã ({len(active_missing_rows):,} người)",
                 data=excel_active,
-                file_name=f"DS_ConHanBHYT_ThieuCCCD_PhoiHopXa_{date.today().strftime('%d%m%Y')}.xlsx",
+                file_name=f"DS_ConHanBHYT_PhoiHopXa_{review_mode}_{date.today().strftime('%d%m%Y')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
-                on_click=lambda: log_activity("EXPORT", {"type": "ACTIVE_MISSING_CCCD", "count": len(active_missing_rows)})
+                on_click=lambda: log_activity("EXPORT", {"type": f"ACTIVE_{review_mode}", "count": len(active_missing_rows)})
             )
             st.dataframe(df_active_missing, use_container_width=True, hide_index=True)
         else:
-            st.success("🎉 Tuyệt vời! Không có trường hợp nào đang còn hạn thẻ BHYT mà bị thiếu số CCCD.")
+            st.success("🎉 Tuyệt vời! Không có trường hợp nào đang còn hạn thẻ BHYT nằm trong diện lỗi này.")
 
     with tab_clean:
         st.warning(
-            "⚠️ **DỮ LIỆU LỖI / THẺ HẾT HẠN:** Đây là các bản ghi có Mã BHXH 10 số, **không có số CCCD** và **hạn thẻ BHYT đã hết hạn (hoặc trống)**. "
+            "⚠️ **DỮ LIỆU LỖI / THẺ HẾT HẠN:** Đây là các bản ghi thuộc tiêu chí rà soát và **hạn thẻ BHYT đã hết hạn (hoặc trống)**. "
             "Bạn nên bấm **Xuất Excel** để lưu kiểm tra trước, sau đó có thể xóa khỏi hệ thống để kho dữ liệu chỉ còn lại người tham gia hợp lệ."
         )
         if expired_missing_rows:
             df_expired_missing = format_participants_df(expired_missing_rows)
-            excel_expired = convert_df_to_excel(df_expired_missing, sheet_name="DuLieuLoi_ThieuCCCD")
+            excel_expired = convert_df_to_excel(df_expired_missing, sheet_name="DuLieuLoi_HetHan")
             st.download_button(
                 label=f"📥 Bước 1: Xuất Excel dữ liệu lỗi để kiểm tra ({len(expired_missing_rows):,} bản ghi)",
                 data=excel_expired,
-                file_name=f"DS_DuLieuLoi_10So_KhongCCCD_HetHan_{date.today().strftime('%d%m%Y')}.xlsx",
+                file_name=f"DS_DuLieuLoi_HetHan_{review_mode}_{date.today().strftime('%d%m%Y')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
-                on_click=lambda: log_activity("EXPORT", {"type": "EXPIRED_MISSING_CCCD", "count": len(expired_missing_rows)})
+                on_click=lambda: log_activity("EXPORT", {"type": f"EXPIRED_{review_mode}", "count": len(expired_missing_rows)})
             )
             st.dataframe(df_expired_missing, use_container_width=True, hide_index=True)
 
@@ -773,17 +938,17 @@ elif choice == "🧹 Rà soát thiếu CCCD":
                 st.write("---")
                 st.subheader("🗑️ Bước 2: Xóa dữ liệu lỗi khỏi hệ thống")
                 st.markdown(
-                    f"- **Số bản ghi sẽ bị xóa:** `{len(expired_missing_rows):,}` bản ghi (Mã 10 số + Không có CCCD + Đã hết hạn thẻ / Không có hạn thẻ).\n"
-                    f"- **Số bản ghi được giữ nguyên an toàn:** Toàn bộ người đã có CCCD và `{len(active_missing_rows):,}` người thiếu CCCD nhưng **còn hạn thẻ BHYT**."
+                    f"- **Số bản ghi sẽ bị xóa:** `{len(expired_missing_rows):,}` bản ghi (Thuộc tiêu chí `{mode_choice}` VÀ Đã hết hạn thẻ / Không có hạn thẻ).\n"
+                    f"- **Số bản ghi được giữ nguyên an toàn:** Toàn bộ người hợp lệ và `{len(active_missing_rows):,}` người thuộc diện rà soát nhưng **còn hạn thẻ BHYT**."
                 )
                 confirm_clean = st.checkbox(
                     f"Tôi đã xuất file Excel kiểm tra và xác nhận xóa {len(expired_missing_rows):,} bản ghi dữ liệu lỗi này khỏi hệ thống",
-                    key="confirm_del_missing_cccd"
+                    key=f"confirm_del_{review_mode}"
                 )
-                if confirm_clean and st.button("🔴 XÓA DỮ LIỆU LỖI (THIẾU CCCD & HẾT HẠN THẺ)", use_container_width=True):
-                    ok, deleted_cnt, msg = delete_expired_missing_cccd()
+                if confirm_clean and st.button("🔴 XÓA DỮ LIỆU LỖI ĐÃ HẾT HẠN THẺ", use_container_width=True):
+                    ok, deleted_cnt, msg = delete_expired_missing_cccd(review_mode)
                     if ok:
-                        log_activity("CLEAN_INVALID_NO_CCCD", {"deleted_rows": deleted_cnt, "kept_active_rows": len(active_missing_rows)})
+                        log_activity("CLEAN_INVALID_NO_CCCD", {"mode": review_mode, "deleted_rows": deleted_cnt, "kept_active_rows": len(active_missing_rows)})
                         st.cache_data.clear()
                         st.success(f"✅ {msg}")
                         time.sleep(1.5)
@@ -791,7 +956,7 @@ elif choice == "🧹 Rà soát thiếu CCCD":
                     else:
                         st.error(msg)
         else:
-            st.success("🎉 Hệ thống đã sạch sẽ! Không còn bản ghi lỗi (Mã 10 số thiếu CCCD và đã hết hạn thẻ) nào trong kho dữ liệu.")
+            st.success("🎉 Hệ thống đã sạch sẽ! Không có bản ghi lỗi đã hết hạn thẻ nào theo tiêu chí này.")
 
 elif choice == "👥 Quản lý nhân sự":
     st.header("👥 Quản lý nhân sự & Phân quyền")
